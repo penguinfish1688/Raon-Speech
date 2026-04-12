@@ -386,6 +386,7 @@ class RaonModel(RaonLossMixin, PreTrainedModel, RaonInferenceModel):
         self.output_losses_only = False
         self._debug_tokenizer: Any | None = None
         self._debug_tokenizer_disabled = False
+        self._forward_debug_runtime_announced = False
 
         # Create thinker text_model: num_hidden_layers IS the thinker count (talker is separate).
         total_layers = int(config.text_model_config.num_hidden_layers)
@@ -1279,14 +1280,7 @@ class RaonModel(RaonLossMixin, PreTrainedModel, RaonInferenceModel):
         if debug_mode:
             if input_ids is None or input_ids.numel() == 0:
                 msg = "forward debug latest token: input_ids is None or empty"
-                logger.info(msg)
-                line = f"[forward-debug] {msg}"
-                print(line, flush=True)
-                print(line, file=sys.stderr, flush=True)
-                try:
-                    os.write(1, (line + "\n").encode("utf-8", errors="replace"))
-                except Exception:
-                    pass
+                self._emit_forward_debug(msg)
             else:
                 if attention_mask is not None:
                     last_pos = attention_mask.long().sum(dim=1).clamp_min(1) - 1
@@ -1332,14 +1326,7 @@ class RaonModel(RaonLossMixin, PreTrainedModel, RaonInferenceModel):
                     kind_i = _token_kind(token_id_i)
                     token_view = self._decode_token_id_for_debug(token_id_i) if kind_i == "text_or_other" else kind_i
                     msg = f"forward debug sample {i} token {pos_i}: {token_view} (id={token_id_i})"
-                    logger.info(msg)
-                    line = f"[forward-debug] {msg}"
-                    print(line, flush=True)
-                    print(line, file=sys.stderr, flush=True)
-                    try:
-                        os.write(1, (line + "\n").encode("utf-8", errors="replace"))
-                    except Exception:
-                        pass
+                    self._emit_forward_debug(msg)
 
         text_outputs = self.text_model(
             attention_mask=attention_mask,
@@ -1626,6 +1613,28 @@ class RaonModel(RaonLossMixin, PreTrainedModel, RaonInferenceModel):
         except Exception as exc:  # noqa: BLE001
             logger.debug("debug token decode failed for id=%d: %s", token_id, exc)
             return f"<id:{token_id}>"
+
+    def _emit_forward_debug(self, msg: str) -> None:
+        """Emit forward debug line to logger/stdout/stderr and a fallback file sink."""
+        line = f"[forward-debug] {msg}"
+        logger.info(msg)
+        print(line, flush=True)
+        print(line, file=sys.stderr, flush=True)
+        try:
+            os.write(1, (line + "\n").encode("utf-8", errors="replace"))
+        except Exception:
+            pass
+
+        log_path = os.getenv("RAON_FORWARD_DEBUG_PATH", "/tmp/raon_forward_debug.log")
+        if log_path:
+            try:
+                with open(log_path, "a", encoding="utf-8") as f:
+                    if not self._forward_debug_runtime_announced:
+                        f.write(f"[forward-debug] runtime pid={os.getpid()} module={__file__}\n")
+                        self._forward_debug_runtime_announced = True
+                    f.write(line + "\n")
+            except Exception:
+                pass
 
 
 # Duplex config — supports checkpoints with model_type="raon_duplex"
