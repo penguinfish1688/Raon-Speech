@@ -1276,7 +1276,9 @@ class RaonModel(RaonLossMixin, PreTrainedModel, RaonInferenceModel):
         inputs_embeds = cast_to_module_dtype(inputs_embeds, self.text_model)
         if debug_mode:
             if input_ids is None or input_ids.numel() == 0:
-                logger.info("forward debug latest token: input_ids is None or empty")
+                msg = "forward debug latest token: input_ids is None or empty"
+                logger.info(msg)
+                print(f"[forward-debug] {msg}", flush=True)
             else:
                 if attention_mask is not None:
                     last_pos = attention_mask.long().sum(dim=1).clamp_min(1) - 1
@@ -1321,13 +1323,9 @@ class RaonModel(RaonLossMixin, PreTrainedModel, RaonInferenceModel):
                 pos_i = int(last_pos_list[i])
                 kind_i = _token_kind(token_id_i)
                 token_view = self._decode_token_id_for_debug(token_id_i) if kind_i == "text_or_other" else kind_i
-                logger.info(
-                    "forward debug sample %d token %d: %s (id=%d)",
-                    i,
-                    pos_i,
-                    token_view,
-                    token_id_i,
-                )
+                msg = f"forward debug sample {i} token {pos_i}: {token_view} (id={token_id_i})"
+                logger.info(msg)
+                print(f"[forward-debug] {msg}", flush=True)
 
         text_outputs = self.text_model(
             attention_mask=attention_mask,
