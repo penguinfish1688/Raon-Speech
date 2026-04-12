@@ -3,6 +3,13 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+.raon_venv/
+.vscode/
+checkpoints/
+output/
+pyrightconfig.*
+
+
 
 
 # C extensions

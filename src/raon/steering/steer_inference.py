@@ -4,6 +4,7 @@ import argparse
 import logging
 import shutil
 from pathlib import Path
+from tqdm import tqdm
 
 import torchaudio
 
@@ -115,6 +116,7 @@ def main() -> None:
         attn_implementation=args.attn_implementation,
         speaker_audio=args.speaker_audio,
     )
+
 
 
 if __name__ == "__main__":

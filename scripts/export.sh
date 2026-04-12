@@ -9,7 +9,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
 
-INPUT_PATH="/path/to/hf-duplex-checkpoint"
+INPUT_PATH="/home/chang168/personaplex/Raon-Speech/checkpoints"
 OUTPUT_PATH="${REPO_DIR}/output/sglang-bundle"
 DTYPE="bfloat16"
 EXTRA_ARGS=()

@@ -81,7 +81,7 @@ class RaonPipeline:
         self.device = device
         self.dtype = torch_dtype
 
-        self.model: RaonModel = RaonModel.from_pretrained(model_path, torch_dtype=torch_dtype).to(device).eval()
+        self.model: RaonModel = RaonModel.from_pretrained(model_path, dtype=torch_dtype).to(device).eval()
         if attn_implementation == "fa":
             attn_implementation = "flash_attention_2"
         if attn_implementation not in {"sdpa", "eager", "flash_attention_2"}:

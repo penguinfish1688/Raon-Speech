@@ -424,8 +424,9 @@ def run_duplex_inference(
     else:
         system_tokens = torch.zeros((1, 0), dtype=torch.long, device=device)
 
-    logger.info("Running duplex generation ...")
-    samples_per_frame = int(sr / processor.frame_rate)
+    logger.info("Running duplex generation ...")    
+    samples_per_frame = int(sr / processor.fra
+                            me_rate)
     audio_input_length = audio_input.shape[-1]
 
     if audio_input_length < samples_per_frame:
