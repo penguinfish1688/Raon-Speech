@@ -1282,20 +1282,6 @@ class RaonModel(RaonLossMixin, PreTrainedModel, RaonInferenceModel):
                 msg = "forward debug latest token: input_ids is None or empty"
                 self._emit_forward_debug(msg)
             else:
-                if attention_mask is not None:
-                    last_pos = attention_mask.long().sum(dim=1).clamp_min(1) - 1
-                else:
-                    last_pos = torch.full(
-                        (input_ids.shape[0],),
-                        input_ids.shape[1] - 1,
-                        device=input_ids.device,
-                        dtype=torch.long,
-                    )
-
-                batch_idx = torch.arange(input_ids.shape[0], device=input_ids.device)
-                last_token_ids = input_ids[batch_idx, last_pos].detach().cpu().tolist()
-                last_pos_list = last_pos.detach().cpu().tolist()
-
                 def _token_kind(token_id: int) -> str:
                     if token_id == AUDIO_INPUT_PLACEHOLDER.id:
                         return "audio_input_placeholder"
@@ -1319,14 +1305,24 @@ class RaonModel(RaonLossMixin, PreTrainedModel, RaonInferenceModel):
                         return "speaker_placeholder"
                     return "text_or_other"
 
-                max_samples = min(4, len(last_token_ids))
-                for i in range(max_samples):
-                    token_id_i = int(last_token_ids[i])
-                    pos_i = int(last_pos_list[i])
-                    kind_i = _token_kind(token_id_i)
-                    token_view = self._decode_token_id_for_debug(token_id_i) if kind_i == "text_or_other" else kind_i
-                    msg = f"forward debug sample {i} token {pos_i}: {token_view} (id={token_id_i})"
-                    self._emit_forward_debug(msg)
+                input_ids_cpu = input_ids.detach().cpu()
+                if attention_mask is not None:
+                    valid_lens = attention_mask.long().sum(dim=1).detach().cpu().tolist()
+                else:
+                    valid_lens = [input_ids_cpu.shape[1]] * input_ids_cpu.shape[0]
+
+                for i in range(input_ids_cpu.shape[0]):
+                    valid_len = int(valid_lens[i])
+                    if valid_len <= 0:
+                        self._emit_forward_debug(f"forward debug sample {i}: no valid input token")
+                        continue
+
+                    for pos_i in range(valid_len):
+                        token_id_i = int(input_ids_cpu[i, pos_i].item())
+                        kind_i = _token_kind(token_id_i)
+                        token_view = self._decode_token_id_for_debug(token_id_i) if kind_i == "text_or_other" else kind_i
+                        msg = f"forward debug sample {i} token {pos_i}: {token_view} (id={token_id_i})"
+                        self._emit_forward_debug(msg)
 
         text_outputs = self.text_model(
             attention_mask=attention_mask,
