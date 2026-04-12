@@ -129,6 +129,7 @@ def inference_batch(
     channel_mode: str = "mono",
     speak_first: bool | None = None,
     speaker_audio: str | None = None,
+    save_hidden: bool = False,
 ) -> dict[str, int]:
     """Run listen-first duplex inference for every ``root/*/input.wav``.
 
@@ -144,6 +145,7 @@ def inference_batch(
         dtype: Torch dtype string.
         attn_implementation: Attention backend (sdpa/eager/fa).
         speaker_audio: Optional speaker reference audio.
+        save_hidden: Save per-step hidden payload to output_hidden.pt under each sample directory.
     """
     if steer:
         logger.warning("steer=True is not implemented yet; running unsteered inference.")
@@ -183,6 +185,7 @@ def inference_batch(
                 "audio_input": audio_input,
                 "output_dir": str(sample_dir),
                 "speaker_audio": resolved_speaker_audio,
+                "save_hidden": save_hidden,
             }
             if speak_first is not None:
                 duplex_kwargs["speak_first"] = speak_first
@@ -247,6 +250,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     speak_group.add_argument("--speak-first", action="store_true", help="Force speak-first mode.")
     speak_group.add_argument("--listen-first", action="store_true", help="Force listen-first mode.")
     ap.add_argument("--speaker-audio", type=str, default=None, help="Optional speaker reference wav path.")
+    ap.add_argument("--save-hidden", action="store_true", help="Save output_hidden.pt for each sample directory.")
     return ap
 
 
@@ -276,6 +280,7 @@ def main() -> None:
         channel_mode=args.channel_mode,
         speak_first=speak_first,
         speaker_audio=args.speaker_audio,
+        save_hidden=args.save_hidden,
     )
 
 

@@ -390,6 +390,7 @@ def run_duplex_inference(
     sil_penalty: float = 0.0,
     bc_penalty: float = 0.0,
     speak_first: bool = False,
+    save_hidden: bool = False,
 ) -> dict:
     """Run full-duplex inference on a single audio input and save results.
 
@@ -427,6 +428,7 @@ def run_duplex_inference(
     logger.info("Running duplex generation ...")    
     samples_per_frame = int(sr / processor.frame_rate)
     audio_input_length = audio_input.shape[-1]
+    expected_decode_steps = ((audio_input_length - samples_per_frame) // samples_per_frame) + 1
 
     if audio_input_length < samples_per_frame:
         raise ValueError(
@@ -450,6 +452,7 @@ def run_duplex_inference(
         )
 
         audio_output_frames: list[torch.Tensor] = []
+        hidden_steps: list[dict[str, torch.Tensor]] = []
         # [DEBUG-LOG] Frame-level logging for text-audio delay analysis
         _prev_seq_len = int(state.sequences.shape[1])
         _frame_log_path = output_dir / "frame_log.txt"
@@ -466,7 +469,11 @@ def run_duplex_inference(
                 desc="Duplex Generation",
             ):
                 audio_input_frame = audio_input[:, i : i + samples_per_frame]
-                state, audio_output_frame = model.duplex_decoding_step(state=state, audio_input=audio_input_frame)
+                state, audio_output_frame = model.duplex_decoding_step(
+                    state=state,
+                    audio_input=audio_input_frame,
+                    hidden_collector=hidden_steps if save_hidden else None,
+                )
                 audio_output_frames.append(audio_output_frame)
 
                 # [DEBUG-LOG] Extract text delta and audio RMS for this frame
@@ -541,6 +548,76 @@ def run_duplex_inference(
     json_path = output_dir / "output.json"
     save_summary(summary, json_path)
     logger.info("Saved summary -> %s", json_path)
+
+    if save_hidden:
+        if len(hidden_steps) != expected_decode_steps:
+            raise RuntimeError(
+                "Hidden step count mismatch: "
+                f"expected {expected_decode_steps} (from input audio frames), "
+                f"got {len(hidden_steps)}."
+            )
+
+    if save_hidden and hidden_steps:
+        frame_rate = float(processor.frame_rate)
+        text_hidden_layers = torch.stack([step["text_hidden_layers"] for step in hidden_steps], dim=0)
+
+        max_width = max(int(step["input_token_ids"].shape[0]) for step in hidden_steps)
+        input_token_ids = torch.full((len(hidden_steps), max_width), -1, dtype=torch.long)
+        for idx, step in enumerate(hidden_steps):
+            ids = step["input_token_ids"].long()
+            input_token_ids[idx, : ids.shape[0]] = ids
+
+        # Follow duplex text extraction logic: text token is the token before [A] when available.
+        token_ids_list = [
+            int(step["input_token_ids"][-2].item()) if step["input_token_ids"].numel() >= 2 else int(step["input_token_ids"][-1].item())
+            for step in hidden_steps
+        ]
+        token_ids = torch.tensor(token_ids_list, dtype=torch.long)
+
+        token_names: list[str] = []
+        tokenizer = processor.tokenizer
+        for token_id in token_ids_list:
+            try:
+                piece = tokenizer.convert_ids_to_tokens(int(token_id))
+                token_names.append(str(piece) if piece is not None else f"<id:{token_id}>")
+            except Exception:  # noqa: BLE001
+                token_names.append(f"<id:{token_id}>")
+
+        times = torch.arange(len(hidden_steps), dtype=torch.float32) / frame_rate
+        token_time_ranges = torch.stack([times, times + (1.0 / frame_rate)], dim=1)
+        output_token_ids = token_ids[:, None]
+
+        hidden_payload = {
+            "schema_version": 6,
+            "input_wav": None,
+            "output_wav": str(assistant_path),
+            "output_text": str(json_path),
+            "frame_rate": frame_rate,
+            "token_ids": token_ids,
+            "token_names": token_names,
+            "input_token_ids": input_token_ids,
+            "input_token_width": int(input_token_ids.shape[1]),
+            "output_token_ids": output_token_ids,
+            "output_token_width": int(output_token_ids.shape[1]),
+            "times": times,
+            "token_time_ranges_sec": token_time_ranges,
+            "text_hidden_layers": text_hidden_layers,
+            "text_pre_unembed_states": text_hidden_layers[:, -1, :],
+            "full_input_embeddings": text_hidden_layers[:, -1, :],
+            "text_attention_weights": [None] * len(hidden_steps),
+            "hidden_states": text_hidden_layers[:, -1, :],
+            "text_keys": torch.empty(0),
+            "text_key_positions": torch.empty(0, dtype=torch.long),
+            "text_key_cache_meta": {
+                "capacity": 0,
+                "end_offset": 0,
+                "valid_len": 0,
+                "dropped_prefix_tokens": 0,
+            },
+        }
+        hidden_path = output_dir / "output_hidden.pt"
+        torch.save(hidden_payload, hidden_path)
+        logger.info("Saved hidden payload -> %s", hidden_path)
 
     return summary
 

@@ -488,6 +488,7 @@ class RaonPipeline:
         audio_input: torch.Tensor,
         output_dir: str,
         *,
+        save_hidden: bool = False,
         system_prompt: str | None = None,
         speak_first: bool | None = None,
         temperature: float | None = None,
@@ -507,6 +508,7 @@ class RaonPipeline:
             audio_input: User audio tensor of shape ``[1, num_samples]``.
             output_dir: Directory to save output files.
             system_prompt: System prompt text.
+            save_hidden: If True, save per-step hidden payload to output_hidden.pt.
             speak_first: If True, the model speaks first.
             temperature: Sampling temperature.
             top_p: Top-p sampling threshold.
@@ -559,6 +561,7 @@ class RaonPipeline:
             dtype=self.dtype,
             eos_penalty=eos_penalty,
             speak_first=speak_first,
+            save_hidden=save_hidden,
         )
 
     # ------------------------------------------------------------------

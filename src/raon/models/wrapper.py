@@ -271,7 +271,9 @@ class RaonInferenceModel(ABC):
         speaker_embeds: torch.Tensor | None = None,
         use_cache: bool | None = False,
         past_key_values: Any = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]: ...
+        cache_position: torch.Tensor | None = None,
+        return_hidden_layer_means: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
 
     @abstractmethod
     def tokenize_audio(
@@ -1025,6 +1027,7 @@ class RaonInferenceModel(ABC):
         self,
         state: RaonDecodingState,
         audio_input: torch.Tensor,
+        hidden_collector: list[dict[str, torch.Tensor]] | None = None,
     ) -> tuple[RaonDecodingState, torch.Tensor]:
         """Run one duplex decoding step: encode user audio, predict tokens/codes, push codes, pull waveform.
 
@@ -1083,7 +1086,9 @@ class RaonInferenceModel(ABC):
         full_position_ids = state.attention_mask.cumsum(dim=1) - 1
         seq_len = state.attention_mask.shape[1]
         cache_position = torch.arange(seq_len - num_input_tokens, seq_len, device=state.sequences.device)
-        talker_last_hidden_state, text_logits = self.inference_forward(
+        step_input_ids = state.sequences[:, -num_input_tokens:]
+        inference_outputs = self.inference_forward(
+            return_hidden_layer_means=hidden_collector is not None,
             input_ids=state.sequences[:, -num_input_tokens:],
             attention_mask=None,
             position_ids=full_position_ids[:, -num_input_tokens:],
@@ -1096,6 +1101,22 @@ class RaonInferenceModel(ABC):
             past_key_values=state.past_key_values,
             cache_position=cache_position,
         )
+        if hidden_collector is not None:
+            talker_last_hidden_state, text_logits, hidden_layer_means = cast(
+                tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+                inference_outputs,
+            )
+            hidden_collector.append(
+                {
+                    "input_token_ids": step_input_ids[0].detach().cpu().long(),
+                    "text_hidden_layers": hidden_layer_means[0].detach().cpu().float(),
+                }
+            )
+        else:
+            talker_last_hidden_state, text_logits = cast(
+                tuple[torch.Tensor, torch.Tensor],
+                inference_outputs,
+            )
 
         # Force SIL for the remaining listen-first warmup frames.
         if state.forced_sil_remaining > 0 and getattr(self, "use_sil_token", False):
@@ -1324,7 +1345,9 @@ class RaonInferenceModel(ABC):
         position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0)
         cache_position = torch.arange(input_ids.shape[1], device=input_ids.device)
 
-        talker_last_hidden_state, text_logits = self.inference_forward(
+        talker_last_hidden_state, text_logits = cast(
+            tuple[torch.Tensor, torch.Tensor],
+            self.inference_forward(
             input_ids=input_ids,
             attention_mask=None,
             position_ids=position_ids,
@@ -1332,6 +1355,7 @@ class RaonInferenceModel(ABC):
             use_cache=True,
             past_key_values=past_key_values,
             cache_position=cache_position,
+            ),
         )
 
         initial_machine_state = self._state_manager.initial_state(speak_first=speak_first)
@@ -1686,7 +1710,9 @@ class RaonInferenceModel(ABC):
                 dtype=torch.bool,
                 device=audio_output_codes.device,
             )
-        talker_last_hidden_state, text_logits = self.inference_forward(
+        talker_last_hidden_state, text_logits = cast(
+            tuple[torch.Tensor, torch.Tensor],
+            self.inference_forward(
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -1702,6 +1728,7 @@ class RaonInferenceModel(ABC):
             use_cache=True,
             past_key_values=past_key_values,
             cache_position=cache_position,
+            ),
         )
 
         if disable_eos_on_first_output:
@@ -1787,7 +1814,9 @@ class RaonInferenceModel(ABC):
         """
         supports_audio_output = bool(getattr(self, "supports_audio_output", True))
         cache_position = attention_mask.sum(dim=1, keepdim=False) - 1
-        talker_last_hidden_state, text_logits = self.inference_forward(
+        talker_last_hidden_state, text_logits = cast(
+            tuple[torch.Tensor, torch.Tensor],
+            self.inference_forward(
             input_ids=sequences[:, -1:],
             position_ids=cache_position.unsqueeze(1),
             attention_mask=attention_mask,
@@ -1796,6 +1825,7 @@ class RaonInferenceModel(ABC):
             past_key_values=past_key_values,
             use_cache=True,
             cache_position=cache_position,
+            ),
         )
         return self._update_sequences_and_generate_audio_codes(
             new_logits=text_logits,

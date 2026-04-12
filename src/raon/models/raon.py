@@ -26,7 +26,12 @@ import sys
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Literal, Self, cast
+from typing import Any, Literal, cast
+
+try:
+    from typing import Self
+except ImportError:  # pragma: no cover - Python <3.11
+    from typing_extensions import Self
 
 import torch
 import torch.nn.functional as F
@@ -336,6 +341,7 @@ class RaonModelOutput(ModelOutput):
     text_last_hidden_state: torch.Tensor | None = None
     talker_last_hidden_state: torch.Tensor | None = None
     text_logits: torch.Tensor | None = None
+    text_hidden_states: tuple[torch.Tensor, ...] | None = None
     audio_logits: torch.Tensor | None = None
     router_logits: tuple[torch.Tensor, ...] | None = None
     past_key_values: Cache | None = None
@@ -1152,6 +1158,7 @@ class RaonModel(RaonLossMixin, PreTrainedModel, RaonInferenceModel):
         audio_output_segments: list[tuple[int, int]] | None = None,
         debug_mode: bool = False,
         debug_step: int | None = None,
+        return_hidden_states: bool = False,
         **kwargs: Any,
     ) -> RaonModelOutput:
         """Run training forward pass: embed inputs, run text model, compute text and audio loss.
@@ -1331,6 +1338,7 @@ class RaonModel(RaonLossMixin, PreTrainedModel, RaonInferenceModel):
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
             cache_position=cache_position,
+            output_hidden_states=return_hidden_states,
             **kwargs,
         )
         assert self.accepted_thinker_hidden_states is not None, (
@@ -1396,6 +1404,7 @@ class RaonModel(RaonLossMixin, PreTrainedModel, RaonInferenceModel):
                 text_last_hidden_state=text_outputs.last_hidden_state,
                 talker_last_hidden_state=talker_last_hidden_state,
                 text_logits=text_logits,
+                text_hidden_states=text_outputs.hidden_states if return_hidden_states else None,
                 audio_logits=audio_logits,
                 router_logits=router_logits,
                 past_key_values=text_outputs.past_key_values,
@@ -1418,7 +1427,8 @@ class RaonModel(RaonLossMixin, PreTrainedModel, RaonInferenceModel):
         use_cache: bool | None = False,
         past_key_values: DynamicCache | StaticCache | None = None,
         cache_position: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return_hidden_layer_means: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Run inference forward pass and return talker hidden state and text logits for decoding.
 
         Args:
@@ -1459,12 +1469,26 @@ class RaonModel(RaonLossMixin, PreTrainedModel, RaonInferenceModel):
             use_cache=use_cache,
             past_key_values=past_key_values,
             cache_position=cache_position,
+            return_hidden_states=return_hidden_layer_means,
         )
         assert isinstance(talker_last_hidden_state := outputs.talker_last_hidden_state, torch.Tensor), (
             "forward must return talker_last_hidden_state as a tensor."
         )
         assert isinstance(text_logits := outputs.text_logits, torch.Tensor), "forward must return text_logits as a tensor."
-        return talker_last_hidden_state, text_logits
+        if not return_hidden_layer_means:
+            return talker_last_hidden_state, text_logits
+
+        hidden_states = outputs.text_hidden_states
+        if not hidden_states or len(hidden_states) <= 1:
+            layer_means = talker_last_hidden_state.new_zeros(
+                (talker_last_hidden_state.shape[0], 0, talker_last_hidden_state.shape[-1])
+            )
+            return talker_last_hidden_state, text_logits, layer_means
+
+        # Exclude embedding output (index 0). Average each layer over current input token span.
+        per_layer_means = [layer_hidden.mean(dim=1) for layer_hidden in hidden_states[1:]]
+        layer_means = torch.stack(per_layer_means, dim=1)
+        return talker_last_hidden_state, text_logits, layer_means
 
     def generate_audio_codes(
         self,
