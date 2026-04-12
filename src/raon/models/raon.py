@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 # Loss methods (unreduced_causal_lm_loss, _compute_audio_loss, _combine_losses, etc.) live in RaonLossMixin (loss.py).
+import logging
 import math
 from collections.abc import Callable
 from copy import deepcopy
@@ -30,6 +31,7 @@ import torch.nn.functional as F
 import torchaudio.functional
 from torch import nn
 from transformers import (
+    AutoTokenizer,
     Cache,
     DynamicCache,
     MimiConfig,
@@ -84,6 +86,7 @@ from ..utils.special_tokens import (
     AUDIO_OUTPUT_PAD,
     AUDIO_OUTPUT_PLACEHOLDER,
     AUDIO_START,
+    DUPLEX_SIL,
     IM_START,
     LOSS_IGNORE_INDEX,
     SPEAKER_EMBEDDING_PLACEHOLDER,
@@ -96,6 +99,8 @@ TEXT_MODEL_CONFIGS: dict[str, type[PretrainedConfig]] = {
 TEXT_MODELS: dict[str, type[PreTrainedModel]] = {
     Qwen3Config.model_type: Qwen3Model,
 }
+
+logger = logging.getLogger(__name__)
 
 
 class RaonConfig(PretrainedConfig):
@@ -377,6 +382,8 @@ class RaonModel(RaonLossMixin, PreTrainedModel, RaonInferenceModel):
         )
         self.frame_rate = frame_rate
         self.output_losses_only = False
+        self._debug_tokenizer: Any | None = None
+        self._debug_tokenizer_disabled = False
 
         # Create thinker text_model: num_hidden_layers IS the thinker count (talker is separate).
         total_layers = int(config.text_model_config.num_hidden_layers)
@@ -1140,7 +1147,7 @@ class RaonModel(RaonLossMixin, PreTrainedModel, RaonInferenceModel):
         use_speaker_embedding: bool = False,
         speaker_embeds: torch.Tensor | None = None,
         audio_output_segments: list[tuple[int, int]] | None = None,
-        debug_mode: bool = False,
+        debug_mode: bool = True,
         debug_step: int | None = None,
         **kwargs: Any,
     ) -> RaonModelOutput:
@@ -1267,6 +1274,61 @@ class RaonModel(RaonLossMixin, PreTrainedModel, RaonInferenceModel):
             )
 
         inputs_embeds = cast_to_module_dtype(inputs_embeds, self.text_model)
+        if debug_mode:
+            if input_ids is None or input_ids.numel() == 0:
+                logger.info("forward debug latest token: input_ids is None or empty")
+            else:
+                if attention_mask is not None:
+                    last_pos = attention_mask.long().sum(dim=1).clamp_min(1) - 1
+                else:
+                    last_pos = torch.full(
+                        (input_ids.shape[0],),
+                        input_ids.shape[1] - 1,
+                        device=input_ids.device,
+                        dtype=torch.long,
+                    )
+
+                batch_idx = torch.arange(input_ids.shape[0], device=input_ids.device)
+                last_token_ids = input_ids[batch_idx, last_pos].detach().cpu().tolist()
+                last_pos_list = last_pos.detach().cpu().tolist()
+
+                def _token_kind(token_id: int) -> str:
+                    if token_id == AUDIO_INPUT_PLACEHOLDER.id:
+                        return "audio_input_placeholder"
+                    if token_id == AUDIO_OUTPUT_PLACEHOLDER.id:
+                        return "audio_output_placeholder"
+                    if token_id == AUDIO_OUTPUT_PAD.id:
+                        return "audio_output_pad"
+                    if token_id == AUDIO_OUTPUT_END_PAD.id:
+                        return "audio_output_end_pad"
+                    if token_id == AUDIO_OUTPUT_BC.id:
+                        return "audio_output_backchannel"
+                    if token_id == DUPLEX_SIL.id:
+                        return "duplex_sil"
+                    if token_id == AUDIO_START.id:
+                        return "audio_start"
+                    if token_id == IM_START.id:
+                        return "im_start"
+                    if token_id == SPEAKER_EMBEDDING_PLACEHOLDER.id:
+                        return "speaker_embedding_placeholder"
+                    if self.speaker_token_id is not None and token_id == self.speaker_token_id:
+                        return "speaker_placeholder"
+                    return "text_or_other"
+
+                max_samples = min(4, len(last_token_ids))
+                i = max_samples - 1
+                token_id_i = int(last_token_ids[i])
+                pos_i = int(last_pos_list[i])
+                kind_i = _token_kind(token_id_i)
+                token_view = self._decode_token_id_for_debug(token_id_i) if kind_i == "text_or_other" else kind_i
+                logger.info(
+                    "forward debug sample %d token %d: %s (id=%d)",
+                    i,
+                    pos_i,
+                    token_view,
+                    token_id_i,
+                )
+
         text_outputs = self.text_model(
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -1527,6 +1589,31 @@ class RaonModel(RaonLossMixin, PreTrainedModel, RaonInferenceModel):
         self.text_model.config._attn_implementation = attn_implementation  # type: ignore
         if self.code_predictor is not None:
             self.code_predictor.config._attn_implementation = attn_implementation  # type: ignore
+
+    def _decode_token_id_for_debug(self, token_id: int) -> str:
+        """Best-effort decode of a text token id for debug logs."""
+        if self._debug_tokenizer is None and not self._debug_tokenizer_disabled:
+            model_name_or_path = getattr(self.config, "_name_or_path", None)
+            if isinstance(model_name_or_path, str) and model_name_or_path:
+                try:
+                    self._debug_tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("debug tokenizer load failed for %s: %s", model_name_or_path, exc)
+                    self._debug_tokenizer_disabled = True
+            else:
+                self._debug_tokenizer_disabled = True
+
+        if self._debug_tokenizer is None:
+            return f"<id:{token_id}>"
+
+        try:
+            tok = self._debug_tokenizer.convert_ids_to_tokens(int(token_id))
+            if tok is None:
+                return f"<id:{token_id}>"
+            return str(tok)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("debug token decode failed for id=%d: %s", token_id, exc)
+            return f"<id:{token_id}>"
 
 
 # Duplex config — supports checkpoints with model_type="raon_duplex"
