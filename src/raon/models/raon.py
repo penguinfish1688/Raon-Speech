@@ -1150,7 +1150,7 @@ class RaonModel(RaonLossMixin, PreTrainedModel, RaonInferenceModel):
         use_speaker_embedding: bool = False,
         speaker_embeds: torch.Tensor | None = None,
         audio_output_segments: list[tuple[int, int]] | None = None,
-        debug_mode: bool = True,
+        debug_mode: bool = False,
         debug_step: int | None = None,
         **kwargs: Any,
     ) -> RaonModelOutput:
@@ -1615,11 +1615,6 @@ class RaonModel(RaonLossMixin, PreTrainedModel, RaonInferenceModel):
         line = f"[forward-debug] {msg}"
         logger.info(msg)
         print(line, flush=True)
-        print(line, file=sys.stderr, flush=True)
-        try:
-            os.write(1, (line + "\n").encode("utf-8", errors="replace"))
-        except Exception:
-            pass
 
         log_path = os.getenv("RAON_FORWARD_DEBUG_PATH", "/tmp/raon_forward_debug.log")
         if log_path:
