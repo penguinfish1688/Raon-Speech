@@ -21,6 +21,8 @@ from __future__ import annotations
 # Loss methods (unreduced_causal_lm_loss, _compute_audio_loss, _combine_losses, etc.) live in RaonLossMixin (loss.py).
 import logging
 import math
+import os
+import sys
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass
@@ -1278,7 +1280,13 @@ class RaonModel(RaonLossMixin, PreTrainedModel, RaonInferenceModel):
             if input_ids is None or input_ids.numel() == 0:
                 msg = "forward debug latest token: input_ids is None or empty"
                 logger.info(msg)
-                print(f"[forward-debug] {msg}", flush=True)
+                line = f"[forward-debug] {msg}"
+                print(line, flush=True)
+                print(line, file=sys.stderr, flush=True)
+                try:
+                    os.write(1, (line + "\n").encode("utf-8", errors="replace"))
+                except Exception:
+                    pass
             else:
                 if attention_mask is not None:
                     last_pos = attention_mask.long().sum(dim=1).clamp_min(1) - 1
@@ -1318,14 +1326,20 @@ class RaonModel(RaonLossMixin, PreTrainedModel, RaonInferenceModel):
                     return "text_or_other"
 
                 max_samples = min(4, len(last_token_ids))
-                i = max_samples - 1
-                token_id_i = int(last_token_ids[i])
-                pos_i = int(last_pos_list[i])
-                kind_i = _token_kind(token_id_i)
-                token_view = self._decode_token_id_for_debug(token_id_i) if kind_i == "text_or_other" else kind_i
-                msg = f"forward debug sample {i} token {pos_i}: {token_view} (id={token_id_i})"
-                logger.info(msg)
-                print(f"[forward-debug] {msg}", flush=True)
+                for i in range(max_samples):
+                    token_id_i = int(last_token_ids[i])
+                    pos_i = int(last_pos_list[i])
+                    kind_i = _token_kind(token_id_i)
+                    token_view = self._decode_token_id_for_debug(token_id_i) if kind_i == "text_or_other" else kind_i
+                    msg = f"forward debug sample {i} token {pos_i}: {token_view} (id={token_id_i})"
+                    logger.info(msg)
+                    line = f"[forward-debug] {msg}"
+                    print(line, flush=True)
+                    print(line, file=sys.stderr, flush=True)
+                    try:
+                        os.write(1, (line + "\n").encode("utf-8", errors="replace"))
+                    except Exception:
+                        pass
 
         text_outputs = self.text_model(
             attention_mask=attention_mask,
