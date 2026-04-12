@@ -33,21 +33,22 @@ def _create_pipeline(
     dtype: str,
     attn_implementation: str,
 ):
-    """Create pipeline preferring HF dynamic-module loading for parity with duplex_example.py."""
+    """Create pipeline preferring local raon import so local code edits are effective."""
     try:
-        pipeline_cls = _load_pipeline_class(model_path)
-        logger.info("Loaded RaonPipeline via HF dynamic module for %s", model_path)
-        return pipeline_cls(model_path, device=device, dtype=dtype, attn_implementation=attn_implementation)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("HF dynamic-module pipeline load failed (%s). Falling back to local raon import.", exc)
         from raon.pipeline import RaonPipeline
 
+        logger.info("Loaded RaonPipeline from local raon package for %s", model_path)
         return RaonPipeline(
             model_path=model_path,
             device=device,
             dtype=dtype,
             attn_implementation=attn_implementation,
         )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Local raon pipeline load failed (%s). Falling back to HF dynamic module.", exc)
+        pipeline_cls = _load_pipeline_class(model_path)
+        logger.info("Loaded RaonPipeline via HF dynamic module for %s", model_path)
+        return pipeline_cls(model_path, device=device, dtype=dtype, attn_implementation=attn_implementation)
 
 
 def _resolve_audio_channel(audio_path: Path, channel_mode: str = "auto-user") -> int | None:
