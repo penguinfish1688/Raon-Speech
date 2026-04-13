@@ -91,6 +91,23 @@ def _load_timing(path: Path) -> tuple[float, float, float]:
     return question_start, question_end, interrupt_start
 
 
+def _load_interrupt_timing(path: Path) -> tuple[float, float]:
+    with path.open("r", encoding="utf-8") as f:
+        timing = json.load(f)
+    if not isinstance(timing, dict):
+        raise ValueError(f"Expected dict in {path}, got {type(timing)}")
+    for key in ("interrupt_start", "interrupt_end"):
+        if key not in timing:
+            raise KeyError(f"Missing '{key}' in {path}")
+
+    interrupt_start = float(timing["interrupt_start"])
+    interrupt_end = float(timing["interrupt_end"])
+    assert interrupt_end >= interrupt_start, (
+        f"Expected interrupt_end >= interrupt_start in {path}, got {interrupt_end} < {interrupt_start}"
+    )
+    return interrupt_start, interrupt_end
+
+
 def _load_question_timing(path: Path) -> tuple[float, float]:
     with path.open("r", encoding="utf-8") as f:
         timing = json.load(f)
@@ -272,11 +289,7 @@ def write_steering_vectors(
 
     updated = 0
     for entry_dir in target_dirs:
-        q_start, q_end, interrupt_start = _load_timing(entry_dir / "input_timing.json")
-        # Alignment sanity: interruption should happen after question starts.
-        assert interrupt_start >= q_start, (
-            f"interrupt_start ({interrupt_start}) must be >= question_start ({q_start}) in {entry_dir}"
-        )
+        interrupt_start, interrupt_end = _load_interrupt_timing(entry_dir / "input_timing.json")
 
         total_tokens = _resolve_total_tokens(entry_dir, frame_rate=frame_rate)
         start_idx = int(interrupt_start * frame_rate)
@@ -288,6 +301,13 @@ def write_steering_vectors(
             f"interrupt_start alignment too large in {entry_dir}: "
             f"interrupt_start={interrupt_start:.6f}, start_idx={start_idx}, idx_time={start_time_from_idx:.6f}"
         )
+        if int(decay_span) > 0:
+            end_idx = min(total_tokens - 1, start_idx + int(decay_span) - 1)
+            end_time_from_idx = end_idx / frame_rate
+            assert end_time_from_idx >= interrupt_start, (
+                f"Invalid decay placement in {entry_dir}: interrupt_start={interrupt_start:.6f}, "
+                f"end_time={end_time_from_idx:.6f}, decay_span={decay_span}"
+            )
 
         steering_path = entry_dir / "steering_vector.json"
         existing = _load_existing_steering_payload(steering_path)
