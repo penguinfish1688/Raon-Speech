@@ -93,7 +93,15 @@ def _extract_centered_2d(mat: np.ndarray, center: int, span: int) -> np.ndarray:
 def _collect_valid_sample_dirs(root: Path) -> list[Path]:
     sample_dirs = [p for p in root.iterdir() if p.is_dir()]
     sample_dirs.sort(key=lambda p: int(p.name) if p.name.isdigit() else p.name)
-    return [sd for sd in sample_dirs if (sd / "output_hidden.pt").is_file() and (sd / "input_timing.json").is_file()]
+    valid: list[Path] = []
+    for sd in sample_dirs:
+        # Explicitly ignore samples missing output_hidden.pt.
+        if not (sd / "output_hidden.pt").is_file():
+            continue
+        if not (sd / "input_timing.json").is_file():
+            continue
+        valid.append(sd)
+    return valid
 
 
 def _log_prob_of_targets(logits_2d: torch.Tensor, targets_1d: torch.Tensor) -> torch.Tensor:
@@ -190,14 +198,14 @@ def _compute_step_ll_mats(
         ah = talker_hidden_td.to(device=device, dtype=model.audio_lm_head.weight.dtype)
         audio_logits = model.audio_lm_head(ah).float()  # [T, V_audio]
         audio_out_target = output_ids_tk[:, 1].to(device=device) if output_ids_tk.shape[1] > 1 else torch.full((t_steps,), -1, device=device, dtype=torch.long)
-        audio_out_ll = _log_prob_of_targets(audio_logits, audio_out_target)  # [T]
+        audio_out_ll = _log_prob_of_targets(audio_logits, audio_out_target).detach().cpu()  # [T]
 
         if t_steps > 1:
             if output_ids_tk.shape[1] > 1:
                 audio_in_target_next = output_ids_tk[1:, 1].to(device=device)
             else:
                 audio_in_target_next = torch.full((t_steps - 1,), -1, device=device, dtype=torch.long)
-            audio_in_ll = _log_prob_of_targets(audio_logits[:-1], audio_in_target_next)  # [T-1]
+            audio_in_ll = _log_prob_of_targets(audio_logits[:-1], audio_in_target_next).detach().cpu()  # [T-1]
 
     # Combine text+audio like Personaplex: mean if both exist, else audio-only when text missing.
     out_ll = text_out_ll.clone()
