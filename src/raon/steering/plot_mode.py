@@ -104,12 +104,46 @@ def _log_prob_of_targets(logits_2d: torch.Tensor, targets_1d: torch.Tensor) -> t
     return vals
 
 
+def _text_ll_for_targets_chunked(
+    hidden_td: torch.Tensor,
+    targets_t: torch.Tensor,
+    *,
+    lm_head: torch.nn.Module,
+    norm_layer: torch.nn.Module | None,
+    device: torch.device,
+    proj_dtype: torch.dtype,
+    chunk_size: int,
+) -> torch.Tensor:
+    """Compute per-step log-likelihood for target token ids without materializing [T,V] globally."""
+    steps = int(hidden_td.shape[0])
+    out = torch.full((steps,), torch.nan, dtype=torch.float32)
+    if steps == 0:
+        return out
+
+    for start in range(0, steps, chunk_size):
+        end = min(steps, start + chunk_size)
+        h = hidden_td[start:end].to(device=device, dtype=proj_dtype)
+        tgt = targets_t[start:end].to(device=device, dtype=torch.long)
+
+        safe_tgt = tgt.clamp(min=0)
+        if norm_layer is not None:
+            h = norm_layer(h)
+        logits = lm_head(h).float()  # [B, V]
+        ll = logits.gather(1, safe_tgt.unsqueeze(1)).squeeze(1) - torch.logsumexp(logits, dim=-1)
+        ll = ll.masked_fill(tgt < 0, torch.nan)
+        out[start:end] = ll.detach().cpu()
+
+    return out
+
+
 def _compute_step_ll_mats(
     hidden_tld: torch.Tensor,
     input_ids_tk: torch.Tensor,
     output_ids_tk: torch.Tensor,
     talker_hidden_td: torch.Tensor | None,
     model: Any,
+    *,
+    chunk_size: int,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return output_ll[L,T] and input_ll[L,T-1]."""
     t_steps, n_layers, d = hidden_tld.shape
@@ -120,23 +154,34 @@ def _compute_step_ll_mats(
     lm_head = model.lm_head
     norm_layer = getattr(model.text_model, "norm", None)
 
-    h = hidden_tld.to(device=device, dtype=lm_head.weight.dtype)  # [T,L,D]
-    h2 = h.reshape(t_steps * n_layers, d)
-    if norm_layer is not None:
-        h2 = norm_layer(h2)
-    text_logits = lm_head(h2).reshape(t_steps, n_layers, -1).float()  # [T,L,V]
-
     text_out_target = output_ids_tk[:, 0].to(device=device)
     text_in_target_next = input_ids_tk[1:, 0].to(device=device)
 
-    text_out_ll = _log_prob_of_targets(text_logits.reshape(t_steps * n_layers, -1), text_out_target.repeat_interleave(n_layers))
-    text_out_ll = text_out_ll.reshape(t_steps, n_layers).transpose(0, 1)  # [L,T]
+    text_out_ll = torch.full((n_layers, t_steps), torch.nan, dtype=torch.float32)
+    text_in_ll = torch.full((n_layers, max(0, t_steps - 1)), torch.nan, dtype=torch.float32)
 
-    text_in_ll = _log_prob_of_targets(
-        text_logits[:-1].reshape((t_steps - 1) * n_layers, -1),
-        text_in_target_next.repeat_interleave(n_layers),
-    )
-    text_in_ll = text_in_ll.reshape(t_steps - 1, n_layers).transpose(0, 1)  # [L,T-1]
+    proj_dtype = lm_head.weight.dtype
+    for layer_idx in range(n_layers):
+        layer_hidden = hidden_tld[:, layer_idx, :]
+        text_out_ll[layer_idx] = _text_ll_for_targets_chunked(
+            layer_hidden,
+            text_out_target,
+            lm_head=lm_head,
+            norm_layer=norm_layer,
+            device=device,
+            proj_dtype=proj_dtype,
+            chunk_size=chunk_size,
+        )
+        if t_steps > 1:
+            text_in_ll[layer_idx] = _text_ll_for_targets_chunked(
+                layer_hidden[:-1],
+                text_in_target_next,
+                lm_head=lm_head,
+                norm_layer=norm_layer,
+                device=device,
+                proj_dtype=proj_dtype,
+                chunk_size=chunk_size,
+            )
 
     # Audio LL is step-level (not per layer). Broadcast over layers when available.
     audio_out_ll: torch.Tensor | None = None
@@ -174,7 +219,7 @@ def _compute_step_ll_mats(
         in_ll = torch.where(both, 0.5 * (in_ll + audio_in_mat), in_ll)
         in_ll = torch.where(~text_valid & audio_valid, audio_in_mat, in_ll)
 
-    return out_ll.detach().cpu().numpy(), in_ll.detach().cpu().numpy()
+    return out_ll.numpy(), in_ll.numpy()
 
 
 def _plot_heatmap(mat: np.ndarray, out_path: Path, *, anchor: str, mode_name: str, span: int, num_samples: int) -> None:
@@ -218,7 +263,16 @@ def _plot_heatmap(mat: np.ndarray, out_path: Path, *, anchor: str, mode_name: st
     plt.close(fig)
 
 
-def plot_mode_ll_heatmap(root_dir: str, *, model_path: str, span: int = 35, anchors: list[str] | None = None, device: str = "cuda") -> None:
+def plot_mode_ll_heatmap(
+    root_dir: str,
+    *,
+    model_path: str,
+    span: int = 35,
+    anchors: list[str] | None = None,
+    device: str = "cuda",
+    dtype: str = "bfloat16",
+    chunk_size: int = 16,
+) -> None:
     root = Path(root_dir)
     if not root.is_dir():
         raise FileNotFoundError(f"Root directory not found: {root}")
@@ -230,7 +284,19 @@ def plot_mode_ll_heatmap(root_dir: str, *, model_path: str, span: int = 35, anch
     if not sample_dirs:
         raise FileNotFoundError(f"No valid samples under {root}. Need root/*/output_hidden.pt and input_timing.json")
 
-    model = AutoModel.from_pretrained(model_path, trust_remote_code=False).to(device).eval()
+    dtype_map = {
+        "bfloat16": torch.bfloat16,
+        "float16": torch.float16,
+        "float32": torch.float32,
+    }
+    if dtype not in dtype_map:
+        raise ValueError(f"Unsupported dtype '{dtype}'. Use one of: {sorted(dtype_map)}")
+
+    model = AutoModel.from_pretrained(
+        model_path,
+        trust_remote_code=False,
+        dtype=dtype_map[dtype],
+    ).to(device).eval()
 
     buckets: dict[str, dict[str, list[np.ndarray]]] = {a: {"input": [], "output": []} for a in anchors}
 
@@ -242,7 +308,14 @@ def plot_mode_ll_heatmap(root_dir: str, *, model_path: str, span: int = 35, anch
             hidden_tld = _extract_hidden_layers(payload)
             input_ids_tk, output_ids_tk = _extract_ids(payload)
             talker_hidden_td = _extract_talker_hidden(payload)
-            output_ll, input_ll = _compute_step_ll_mats(hidden_tld, input_ids_tk, output_ids_tk, talker_hidden_td, model)
+            output_ll, input_ll = _compute_step_ll_mats(
+                hidden_tld,
+                input_ids_tk,
+                output_ids_tk,
+                talker_hidden_td,
+                model,
+                chunk_size=chunk_size,
+            )
 
             frame_rate = float(payload.get("frame_rate", 12.5))
             with timing_path.open("r", encoding="utf-8") as f:
@@ -306,6 +379,8 @@ def main() -> None:
     ap.add_argument("--root-dir", type=str, required=True, help="Root dir containing <id>/output_hidden.pt and <id>/input_timing.json")
     ap.add_argument("--model-path", type=str, default="KRAFTON/Raon-SpeechChat-9B", help="Model path/repo used to load unembedding heads")
     ap.add_argument("--device", type=str, default="cuda", help="Device for model forward")
+    ap.add_argument("--dtype", type=str, default="bfloat16", choices=["bfloat16", "float16", "float32"], help="Model/head dtype for LL projection")
+    ap.add_argument("--chunk-size", type=int, default=16, help="Step chunk size for LL projection to reduce VRAM")
     ap.add_argument("--span", type=int, default=35, help="Half-window size in step index around anchor")
     ap.add_argument("--anchors", type=str, nargs="+", default=DEFAULT_ANCHORS, help="Anchor keys from input_timing.json")
     args = ap.parse_args()
@@ -316,6 +391,8 @@ def main() -> None:
         span=int(args.span),
         anchors=[str(a) for a in args.anchors],
         device=args.device,
+        dtype=args.dtype,
+        chunk_size=int(args.chunk_size),
     )
 
 
