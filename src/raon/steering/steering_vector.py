@@ -91,21 +91,16 @@ def _load_timing(path: Path) -> tuple[float, float, float]:
     return question_start, question_end, interrupt_start
 
 
-def _load_interrupt_timing(path: Path) -> tuple[float, float]:
+def _load_interrupt_timing(path: Path) -> float:
     with path.open("r", encoding="utf-8") as f:
         timing = json.load(f)
     if not isinstance(timing, dict):
         raise ValueError(f"Expected dict in {path}, got {type(timing)}")
-    for key in ("interrupt_start", "interrupt_end"):
-        if key not in timing:
-            raise KeyError(f"Missing '{key}' in {path}")
+    if "interrupt_start" not in timing:
+        raise KeyError(f"Missing 'interrupt_start' in {path}")
 
     interrupt_start = float(timing["interrupt_start"])
-    interrupt_end = float(timing["interrupt_end"])
-    assert interrupt_end >= interrupt_start, (
-        f"Expected interrupt_end >= interrupt_start in {path}, got {interrupt_end} < {interrupt_start}"
-    )
-    return interrupt_start, interrupt_end
+    return interrupt_start
 
 
 def _load_question_timing(path: Path) -> tuple[float, float]:
@@ -289,7 +284,7 @@ def write_steering_vectors(
 
     updated = 0
     for entry_dir in target_dirs:
-        interrupt_start, interrupt_end = _load_interrupt_timing(entry_dir / "input_timing.json")
+        interrupt_start = _load_interrupt_timing(entry_dir / "input_timing.json")
 
         total_tokens = _resolve_total_tokens(entry_dir, frame_rate=frame_rate)
         start_idx = int(interrupt_start * frame_rate)
