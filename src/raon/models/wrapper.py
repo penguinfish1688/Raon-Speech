@@ -915,7 +915,7 @@ class RaonInferenceModel(ABC):
         sil_penalty: float = 0.0,
         bc_penalty: float = 0.0,
         machine_state: DuplexMachineState | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, DuplexMachineState | None]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, DuplexMachineState | None, int]:
         if new_logits.shape[0] != 1:
             raise NotImplementedError(f"Only batch size 1 is supported but got `{new_logits.shape[0]}`.")
 
@@ -1020,7 +1020,7 @@ class RaonInferenceModel(ABC):
 
         sequences = torch.cat((sequences, input_ids), dim=1)
         attention_mask = F.pad(attention_mask, (0, input_ids.shape[1]), value=1)
-        return input_ids, sequences, attention_mask, audio_codes, audio_codes_mask, new_machine_state
+        return input_ids, sequences, attention_mask, audio_codes, audio_codes_mask, new_machine_state, predicted_token_id
 
     @torch.inference_mode()
     def duplex_decoding_step(
@@ -1078,7 +1078,6 @@ class RaonInferenceModel(ABC):
 
         # Determine num_input_tokens from state machine
         num_input_tokens = state.machine_state.num_input_tokens
-        has_text_input = num_input_tokens == 3
 
         step_audio_codes = state.audio_codes[:, -1:] if state.audio_codes.shape[1] > 0 else None
         step_audio_codes_mask = state.audio_codes_mask[:, -1:] if state.audio_codes_mask.shape[1] > 0 else None
@@ -1124,7 +1123,7 @@ class RaonInferenceModel(ABC):
 
         # Standard mode (with optional EPAD support)
         new_machine_state: DuplexMachineState | None = state.machine_state
-        _, sequences, attention_mask, audio_codes, audio_codes_mask, new_machine_state = (
+        _, sequences, attention_mask, audio_codes, audio_codes_mask, new_machine_state, predicted_text_token_id = (
             self._update_duplex_sequences_and_generate_audio_codes(
                 new_logits=text_logits,
                 new_last_hidden_state=talker_last_hidden_state,
@@ -1188,7 +1187,7 @@ class RaonInferenceModel(ABC):
 
         if hidden_collector is not None:
             assert step_input_ids_cpu is not None and step_hidden_layers_cpu is not None
-            text_output_token_id = int(step_input_ids[0, 0].item()) if has_text_input else -1
+            text_output_token_id = predicted_text_token_id
             audio_output_token_id = -1
             if audio_codes.shape[1] > prev_audio_codes_length:
                 # First codebook token produced for this frame.
@@ -1384,7 +1383,7 @@ class RaonInferenceModel(ABC):
             forced_logits[:, -2, forced_initial_prediction_id] = 0.0
             text_logits = forced_logits
 
-        _, sequences, attention_mask, audio_codes, audio_codes_mask, initial_machine_state = (
+        _, sequences, attention_mask, audio_codes, audio_codes_mask, initial_machine_state, _ = (
             self._update_duplex_sequences_and_generate_audio_codes(
                 new_logits=text_logits,
                 new_last_hidden_state=talker_last_hidden_state,

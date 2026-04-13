@@ -5,7 +5,7 @@ This follows Personaplex-style premature decoding semantics at step level:
 - input line:  log p(target at step n+1 | layer-l distribution at step n)
 
 Targets are computed from per-step saved token ids in ``output_hidden.pt``:
-- text target: ``output_token_ids[:, 0]`` (current step) / ``input_token_ids[:, 0]`` (next step)
+- text target: ``output_token_ids[:, 0]`` (current step) / ``output_token_ids[1:, 0]`` (next step)
 - audio target: ``output_token_ids[:, 1]`` (current/next step)
 
 For each (step, layer):
@@ -163,7 +163,9 @@ def _compute_step_ll_mats(
     norm_layer = getattr(model.text_model, "norm", None)
 
     text_out_target = output_ids_tk[:, 0].to(device=device)
-    text_in_target_next = input_ids_tk[1:, 0].to(device=device)
+    # Use next-step predicted output token as the shifted target.
+    # This is robust across sequence layouts (e.g., UTA vs non-UTA).
+    text_in_target_next = output_ids_tk[1:, 0].to(device=device)
 
     text_out_ll = torch.full((n_layers, t_steps), torch.nan, dtype=torch.float32)
     text_in_ll = torch.full((n_layers, max(0, t_steps - 1)), torch.nan, dtype=torch.float32)
