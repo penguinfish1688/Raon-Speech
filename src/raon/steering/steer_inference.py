@@ -15,8 +15,29 @@ from raon.utils.duplex_data import CHANNEL_DUPLEX_TO_SYSTEM_MESSAGE, get_duplex_
 logger = logging.getLogger(__name__)
 
 
+def _is_local_path(model_path: str) -> bool:
+    return model_path.startswith(("/", "./", "../", "~"))
+
+
+def _validate_local_model_path(model_path: str) -> Path:
+    model_dir = Path(model_path).expanduser().resolve()
+    config_path = model_dir / "config.json"
+    if not model_dir.exists():
+        raise FileNotFoundError(f"Local model path does not exist: {model_dir}")
+    if not model_dir.is_dir():
+        raise FileNotFoundError(f"Local model path is not a directory: {model_dir}")
+    if not config_path.exists():
+        raise FileNotFoundError(
+            f"Invalid local model directory (missing config.json): {config_path}. "
+            "Pass a HF repo id (e.g. KRAFTON/Raon-SpeechChat-9B) or a valid local checkpoint folder."
+        )
+    return model_dir
+
+
 def _load_pipeline_class(model_path: str):
     """Load RaonPipeline class from HF remote code, mirroring duplex_example.py."""
+    if _is_local_path(model_path):
+        _validate_local_model_path(model_path)
     cfg = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
     revision = getattr(cfg, "_commit_hash", None)
     return get_class_from_dynamic_module(
@@ -34,6 +55,10 @@ def _create_pipeline(
     attn_implementation: str,
 ):
     """Create pipeline preferring local raon import so local code edits are effective."""
+    if _is_local_path(model_path):
+        # Local path should be a proper HF-style checkpoint dir; fail fast with clear message.
+        _validate_local_model_path(model_path)
+
     try:
         from raon.pipeline import RaonPipeline
 
@@ -45,6 +70,10 @@ def _create_pipeline(
             attn_implementation=attn_implementation,
         )
     except Exception as exc:  # noqa: BLE001
+        if _is_local_path(model_path):
+            raise RuntimeError(
+                f"Failed to load local model from '{model_path}' via local raon pipeline: {exc}"
+            ) from exc
         logger.warning("Local raon pipeline load failed (%s). Falling back to HF dynamic module.", exc)
         pipeline_cls = _load_pipeline_class(model_path)
         logger.info("Loaded RaonPipeline via HF dynamic module for %s", model_path)
