@@ -567,12 +567,29 @@ def run_duplex_inference(
             ids = step["input_token_ids"].long()
             input_token_ids[idx, : ids.shape[0]] = ids
 
-        # Follow duplex text extraction logic: text token is the token before [A] when available.
-        token_ids_list = [
-            int(step["input_token_ids"][-2].item()) if step["input_token_ids"].numel() >= 2 else int(step["input_token_ids"][-1].item())
-            for step in hidden_steps
-        ]
-        token_ids = torch.tensor(token_ids_list, dtype=torch.long)
+        # Per-step output tokens: [text_token, audio_token] where missing values are -1.
+        if all("output_token_ids" in step for step in hidden_steps):
+            output_token_ids = torch.stack(
+                [step["output_token_ids"].long() for step in hidden_steps],
+                dim=0,
+            )
+        else:
+            # Fallback for legacy collector shape.
+            fallback_text = [
+                int(step["input_token_ids"][-2].item()) if step["input_token_ids"].numel() >= 2 else int(step["input_token_ids"][-1].item())
+                for step in hidden_steps
+            ]
+            output_token_ids = torch.stack(
+                [
+                    torch.tensor([text_id, -1], dtype=torch.long)
+                    for text_id in fallback_text
+                ],
+                dim=0,
+            )
+
+        # Keep token_ids/token_names as text-stream summary for compatibility.
+        token_ids = output_token_ids[:, 0].clone()
+        token_ids_list = [int(x.item()) for x in token_ids]
 
         token_names: list[str] = []
         tokenizer = processor.tokenizer
@@ -582,8 +599,6 @@ def run_duplex_inference(
                 token_names.append(str(piece) if piece is not None else f"<id:{token_id}>")
             except Exception:  # noqa: BLE001
                 token_names.append(f"<id:{token_id}>")
-
-        output_token_ids = token_ids[:, None]
 
         hidden_payload = {
             "schema_version": 6,

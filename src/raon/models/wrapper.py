@@ -1101,17 +1101,15 @@ class RaonInferenceModel(ABC):
             past_key_values=state.past_key_values,
             cache_position=cache_position,
         )
+        step_input_ids_cpu: torch.Tensor | None = None
+        step_hidden_layers_cpu: torch.Tensor | None = None
         if hidden_collector is not None:
             talker_last_hidden_state, text_logits, hidden_layer_means = cast(
                 tuple[torch.Tensor, torch.Tensor, torch.Tensor],
                 inference_outputs,
             )
-            hidden_collector.append(
-                {
-                    "input_token_ids": step_input_ids[0].detach().cpu().long(),
-                    "text_hidden_layers": hidden_layer_means[0].detach().cpu().float(),
-                }
-            )
+            step_input_ids_cpu = step_input_ids[0].detach().cpu().long()
+            step_hidden_layers_cpu = hidden_layer_means[0].detach().cpu().float()
         else:
             talker_last_hidden_state, text_logits = cast(
                 tuple[torch.Tensor, torch.Tensor],
@@ -1187,6 +1185,24 @@ class RaonInferenceModel(ABC):
                 self.push_audio_codes(audio_codes=audio_codes[0, -1], stream_id=state.audio_decoder_stream_id)
 
             decoded_audio = self.pull_audio(state.audio_decoder_stream_id)
+
+        if hidden_collector is not None:
+            assert step_input_ids_cpu is not None and step_hidden_layers_cpu is not None
+            text_output_token_id = int(step_input_ids[0, 0].item()) if has_text_input else -1
+            audio_output_token_id = -1
+            if audio_codes.shape[1] > prev_audio_codes_length:
+                # First codebook token produced for this frame.
+                audio_output_token_id = int(audio_codes[0, -1, 0].item())
+            hidden_collector.append(
+                {
+                    "input_token_ids": step_input_ids_cpu,
+                    "output_token_ids": torch.tensor(
+                        [text_output_token_id, audio_output_token_id],
+                        dtype=torch.long,
+                    ),
+                    "text_hidden_layers": step_hidden_layers_cpu,
+                }
+            )
 
         updated_state = RaonDecodingState(
             sequences=sequences,
