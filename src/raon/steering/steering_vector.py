@@ -91,6 +91,21 @@ def _load_timing(path: Path) -> tuple[float, float, float]:
     return question_start, question_end, interrupt_start
 
 
+def _load_question_timing(path: Path) -> tuple[float, float]:
+    with path.open("r", encoding="utf-8") as f:
+        timing = json.load(f)
+    if not isinstance(timing, dict):
+        raise ValueError(f"Expected dict in {path}, got {type(timing)}")
+    for key in ("question_start", "question_end"):
+        if key not in timing:
+            raise KeyError(f"Missing '{key}' in {path}")
+
+    question_start = float(timing["question_start"])
+    question_end = float(timing["question_end"])
+    assert question_end > question_start, f"Expected question_end > question_start in {path}"
+    return question_start, question_end
+
+
 def _wav_duration_seconds(wav_path: Path) -> float:
     try:
         with wave.open(str(wav_path), "rb") as wf:
@@ -150,31 +165,42 @@ def _compute_mean_direction(mode_class_dataset: Path, alpha: float) -> tuple[tor
             assert abs(float(frame_rate) - float(dataset_frame_rate)) < 1e-6, (
                 f"Inconsistent frame_rate in mode_class_dataset: {frame_rate} vs {dataset_frame_rate}"
             )
-        q_start, q_end, _ = _load_timing(sd / "input_timing.json")
+        q_start, q_end = _load_question_timing(sd / "input_timing.json")
 
         num_steps = int(hidden.shape[0])
         listen_mask, speak_mask = _build_mode_masks(num_steps, frame_rate, q_start, q_end)
+        sample_listen_count = int(listen_mask.sum())
+        sample_speak_count = int(speak_mask.sum())
+        print(
+            f"[steering_vector][mode_class] sample={sd.name} "
+            f"listening_tokens={sample_listen_count} speaking_tokens={sample_speak_count} "
+            f"total_steps={num_steps}"
+        )
 
-        if int(listen_mask.sum()) > 0:
+        if sample_listen_count > 0:
             listen_chunk = hidden[listen_mask].sum(dim=0).cpu()  # [L,D]
             if listen_sum is None:
                 listen_sum = torch.zeros_like(listen_chunk)
             assert listen_sum.shape == listen_chunk.shape, "listen shape mismatch"
             listen_sum += listen_chunk
-            listen_count += int(listen_mask.sum())
+            listen_count += sample_listen_count
 
-        if int(speak_mask.sum()) > 0:
+        if sample_speak_count > 0:
             speak_chunk = hidden[speak_mask].sum(dim=0).cpu()  # [L,D]
             if speak_sum is None:
                 speak_sum = torch.zeros_like(speak_chunk)
             assert speak_sum.shape == speak_chunk.shape, "speak shape mismatch"
             speak_sum += speak_chunk
-            speak_count += int(speak_mask.sum())
+            speak_count += sample_speak_count
 
     if listen_sum is None or speak_sum is None:
         raise RuntimeError("Failed to collect both listening and speaking hidden chunks.")
     assert listen_count > 0, "No listening tokens collected from mode_class_dataset"
     assert speak_count > 0, "No speaking tokens collected from mode_class_dataset"
+    print(
+        f"[steering_vector][mode_class] aggregate listening_tokens={listen_count} "
+        f"speaking_tokens={speak_count}"
+    )
 
     mu_listen = listen_sum / float(listen_count)  # [L,D]
     mu_speak = speak_sum / float(speak_count)  # [L,D]
