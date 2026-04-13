@@ -226,6 +226,7 @@ def inference_batch(
     root_dir: str | Path,
     steer: int | None = None,
     *,
+    resume: int = 0,
     model_path: str = "KRAFTON/Raon-SpeechChat-9B",
     device: str = "cuda",
     dtype: str = "bfloat16",
@@ -257,6 +258,7 @@ def inference_batch(
         attn_implementation: Attention backend (sdpa/eager/fa).
         speaker_audio: Optional speaker reference audio.
         save_hidden: Save per-step hidden payload to output_hidden.pt under each sample directory.
+        resume: 0-based index to resume from. 0 means process all samples from the beginning.
     """
     if steer is not None:
         logger.info("Steering enabled at layer=%s", steer)
@@ -276,6 +278,21 @@ def inference_batch(
 
     if not input_paths:
         raise FileNotFoundError(f"No input files found under {root} with pattern */input.wav")
+
+    resume_idx = int(resume)
+    if resume_idx < 0:
+        raise ValueError(f"--resume must be >= 0, got {resume_idx}")
+    if resume_idx > 0:
+        if resume_idx >= len(input_paths):
+            raise ValueError(
+                f"--resume={resume_idx} out of range for {len(input_paths)} samples under {root}"
+            )
+        input_paths = input_paths[resume_idx:]
+        logger.info("Resume enabled: starting from index %d, remaining samples=%d", resume_idx, len(input_paths))
+        print(
+            f"[steer_inference] resume={resume_idx}, remaining_samples={len(input_paths)}",
+            flush=True,
+        )
 
     pipe = _create_pipeline(
         model_path=model_path,
@@ -370,6 +387,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     speak_group.add_argument("--listen-first", action="store_true", help="Force listen-first mode.")
     ap.add_argument("--speaker-audio", type=str, default=None, help="Optional speaker reference wav path.")
     ap.add_argument("--save-hidden", action="store_true", help="Save output_hidden.pt for each sample directory.")
+    ap.add_argument("--resume", type=int, default=0, help="Resume from this 0-based sample index. --resume 0 equals default behavior.")
     return ap
 
 
@@ -385,6 +403,7 @@ def main() -> None:
     inference_batch(
         root_dir=args.root_dir,
         steer=args.steer,
+        resume=args.resume,
         model_path=args.model_path,
         device=args.device,
         dtype=args.dtype,
