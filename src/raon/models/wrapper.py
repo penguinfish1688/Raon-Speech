@@ -1200,6 +1200,7 @@ class RaonInferenceModel(ABC):
                         [text_output_token_id, audio_output_token_id],
                         dtype=torch.long,
                     ),
+                    "talker_hidden_state": talker_last_hidden_state[0, -1].detach().cpu().float(),
                     "text_hidden_layers": step_hidden_layers_cpu,
                 }
             )

@@ -560,6 +560,7 @@ def run_duplex_inference(
     if save_hidden and hidden_steps:
         frame_rate = float(processor.frame_rate)
         text_hidden_layers = torch.stack([step["text_hidden_layers"] for step in hidden_steps], dim=0)
+        talker_hidden_states = torch.stack([step["talker_hidden_state"] for step in hidden_steps], dim=0)
 
         max_width = max(int(step["input_token_ids"].shape[0]) for step in hidden_steps)
         input_token_ids = torch.full((len(hidden_steps), max_width), -1, dtype=torch.long)
@@ -611,6 +612,7 @@ def run_duplex_inference(
             "input_token_ids": input_token_ids,
             "input_token_width": int(input_token_ids.shape[1]),
             "output_token_ids": output_token_ids,
+            "talker_hidden_states": talker_hidden_states,
             # Preserve every layer: [T, L, D]
             "hidden_states": text_hidden_layers,
         }
