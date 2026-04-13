@@ -583,8 +583,6 @@ def run_duplex_inference(
             except Exception:  # noqa: BLE001
                 token_names.append(f"<id:{token_id}>")
 
-        times = torch.arange(len(hidden_steps), dtype=torch.float32) / frame_rate
-        token_time_ranges = torch.stack([times, times + (1.0 / frame_rate)], dim=1)
         output_token_ids = token_ids[:, None]
 
         hidden_payload = {
@@ -598,22 +596,8 @@ def run_duplex_inference(
             "input_token_ids": input_token_ids,
             "input_token_width": int(input_token_ids.shape[1]),
             "output_token_ids": output_token_ids,
-            "output_token_width": int(output_token_ids.shape[1]),
-            "times": times,
-            "token_time_ranges_sec": token_time_ranges,
-            "text_hidden_layers": text_hidden_layers,
-            "text_pre_unembed_states": text_hidden_layers[:, -1, :],
-            "full_input_embeddings": text_hidden_layers[:, -1, :],
-            "text_attention_weights": [None] * len(hidden_steps),
-            "hidden_states": text_hidden_layers[:, -1, :],
-            "text_keys": torch.empty(0),
-            "text_key_positions": torch.empty(0, dtype=torch.long),
-            "text_key_cache_meta": {
-                "capacity": 0,
-                "end_offset": 0,
-                "valid_len": 0,
-                "dropped_prefix_tokens": 0,
-            },
+            # Preserve every layer: [T, L, D]
+            "hidden_states": text_hidden_layers,
         }
         hidden_path = output_dir / "output_hidden.pt"
         torch.save(hidden_payload, hidden_path)
