@@ -204,11 +204,10 @@ def _load_step_steering_vectors(sample_dir: Path, layer: int) -> list[torch.Tens
             pass
 
     first_time_sec = (first_non_none_idx / frame_rate) if first_non_none_idx >= 0 else -1.0
-    logger.info(
-        (
-            "Loaded steering vectors for %s layer=%d: total_steps=%d, active_steps=%d, "
-            "vector_dim=%d, max_l2=%.6f, first_active_idx=%d, first_active_time=%.6fs"
-        ),
+    msg = (
+        "Loaded steering vectors for %s layer=%d: total_steps=%d, active_steps=%d, "
+        "vector_dim=%d, max_l2=%.6f, first_active_idx=%d, first_active_time=%.6fs"
+    ) % (
         sample_dir,
         int(layer),
         len(out),
@@ -218,6 +217,8 @@ def _load_step_steering_vectors(sample_dir: Path, layer: int) -> list[torch.Tens
         first_non_none_idx,
         first_time_sec,
     )
+    logger.info(msg)
+    print(f"[steer_inference] {msg}", flush=True)
     return out
 
 
@@ -259,6 +260,7 @@ def inference_batch(
     """
     if steer is not None:
         logger.info("Steering enabled at layer=%s", steer)
+        print(f"[steer_inference] Steering enabled at layer={steer}", flush=True)
 
     root = Path(root_dir).expanduser().resolve()
     if not root.exists():
@@ -300,6 +302,10 @@ def inference_batch(
             if steer is not None:
                 duplex_kwargs["steering_layer"] = int(steer)
                 duplex_kwargs["steering_vectors"] = _load_step_steering_vectors(sample_dir, int(steer))
+                print(
+                    f"[steer_inference] sample={sample_dir.name} layer={int(steer)} vectors_loaded={len(duplex_kwargs['steering_vectors'])}",
+                    flush=True,
+                )
             if speak_first is not None:
                 duplex_kwargs["speak_first"] = speak_first
             if resolved_prompt is not None:
@@ -368,7 +374,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.INFO, force=True)
     args = _build_arg_parser().parse_args()
     speak_first = None
     if args.speak_first:
