@@ -521,7 +521,11 @@ class RaonModel(RaonLossMixin, PreTrainedModel, RaonInferenceModel):
             self.code_predictor = None
 
         self.accepted_thinker_hidden_states: torch.Tensor | None = None
+        self._step_steering_layer: int | None = None
+        self._step_steering_vector: torch.Tensor | None = None
+        self._steering_hook_handles: list[Any] = []
         self.register_thinker_capture_hook()
+        self.register_step_steering_hooks()
 
         self.code_predictor_grad_scale = _read_loss_param(
             env_key="RAON_CODE_PREDICTOR_GRAD_SCALE",
@@ -641,6 +645,63 @@ class RaonModel(RaonLossMixin, PreTrainedModel, RaonInferenceModel):
             self.accepted_thinker_hidden_states = output[0] if isinstance(output, tuple) else output
 
         cast(list[nn.Module], self.text_model.layers)[self.accept_hidden_layer].register_forward_hook(hook)
+
+    def register_step_steering_hooks(self) -> None:
+        """Register forward hooks to inject per-step steering vectors at a chosen thinker layer."""
+
+        def _make_hook(layer_idx: int):
+            def _hook(_module: nn.Module, _input: Any, output: Any) -> Any:
+                if self._step_steering_layer is None or self._step_steering_vector is None:
+                    return output
+                if int(layer_idx) != int(self._step_steering_layer):
+                    return output
+
+                if isinstance(output, tuple):
+                    hidden = output[0]
+                    if hidden is None:
+                        return output
+                    assert isinstance(hidden, torch.Tensor)
+                    vec = self._step_steering_vector.to(device=hidden.device, dtype=hidden.dtype).reshape(1, 1, -1)
+                    hidden = hidden + vec
+                    return (hidden, *output[1:])
+
+                if isinstance(output, torch.Tensor):
+                    vec = self._step_steering_vector.to(device=output.device, dtype=output.dtype).reshape(1, 1, -1)
+                    return output + vec
+
+                return output
+
+            return _hook
+
+        layers = cast(list[nn.Module], self.text_model.layers)
+        for idx, layer in enumerate(layers):
+            self._steering_hook_handles.append(layer.register_forward_hook(_make_hook(idx)))
+
+    def set_step_steering(
+        self,
+        steering_layer: int | None,
+        steering_vector: torch.Tensor | None,
+    ) -> None:
+        """Set or clear one-step steering state used by layer hooks during forward."""
+        if steering_vector is None or steering_layer is None:
+            self._step_steering_layer = None
+            self._step_steering_vector = None
+            return
+
+        num_layers = len(cast(list[nn.Module], self.text_model.layers))
+        if steering_layer < 0 or steering_layer >= num_layers:
+            raise ValueError(f"steering_layer out of range: {steering_layer}, valid [0, {num_layers - 1}]")
+
+        vec = steering_vector.detach()
+        if vec.dim() != 1:
+            vec = vec.reshape(-1)
+        if int(vec.numel()) != int(self.hidden_size):
+            raise ValueError(
+                f"steering_vector dim mismatch: got {int(vec.numel())}, expected {int(self.hidden_size)}"
+            )
+
+        self._step_steering_layer = int(steering_layer)
+        self._step_steering_vector = vec.float().cpu()
 
     def get_input_embeddings(self) -> nn.Embedding:
         """Return the text model input embedding layer."""

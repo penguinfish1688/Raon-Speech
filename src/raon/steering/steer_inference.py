@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import shutil
 from pathlib import Path
 from tqdm import tqdm
 
 import torchaudio
+import torch
 from transformers import AutoConfig
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
@@ -140,9 +142,88 @@ def _resolve_speaker_audio_path(speaker_audio: str | None) -> str | None:
     return None
 
 
+def _load_step_steering_vectors(sample_dir: Path, layer: int) -> list[torch.Tensor | None]:
+    steering_path = sample_dir / "steering_vector.json"
+    if not steering_path.exists():
+        raise FileNotFoundError(f"Missing steering file: {steering_path}")
+
+    with steering_path.open("r", encoding="utf-8") as f:
+        payload = json.load(f)
+    if not isinstance(payload, dict):
+        raise ValueError(f"Expected dict in {steering_path}, got {type(payload)}")
+
+    layer_key = f"layer_{int(layer)}"
+    if layer_key not in payload:
+        available = sorted(k for k in payload.keys() if isinstance(k, str) and k.startswith("layer_"))
+        raise KeyError(
+            f"Missing key '{layer_key}' in {steering_path}. Available layer keys: {available}"
+        )
+
+    layer_payload = payload[layer_key]
+    if not isinstance(layer_payload, dict):
+        raise ValueError(f"Expected dict at {layer_key} in {steering_path}")
+
+    parsed: dict[int, torch.Tensor | None] = {}
+    max_idx = -1
+    for key, value in layer_payload.items():
+        idx = int(key)
+        if idx < 0:
+            continue
+        max_idx = max(max_idx, idx)
+        if value is None:
+            parsed[idx] = None
+        else:
+            vec = torch.as_tensor(value, dtype=torch.float32).reshape(-1)
+            parsed[idx] = vec
+
+    if max_idx < 0:
+        return []
+
+    out: list[torch.Tensor | None] = [None] * (max_idx + 1)
+    for idx, vec in parsed.items():
+        out[idx] = vec
+    non_null = sum(1 for v in out if v is not None)
+    first_dim = next((int(v.numel()) for v in out if v is not None), -1)
+    first_non_none_idx = next((i for i, v in enumerate(out) if v is not None), -1)
+    max_l2 = 0.0
+    for v in out:
+        if v is None:
+            continue
+        l2 = float(v.float().norm().item())
+        if l2 > max_l2:
+            max_l2 = l2
+
+    frame_rate = 12.5
+    hidden_path = sample_dir / "output_hidden.pt"
+    if hidden_path.exists():
+        try:
+            hidden_payload = torch.load(str(hidden_path), map_location="cpu", weights_only=False)
+            if isinstance(hidden_payload, dict) and "frame_rate" in hidden_payload:
+                frame_rate = float(hidden_payload["frame_rate"])
+        except Exception:  # noqa: BLE001
+            pass
+
+    first_time_sec = (first_non_none_idx / frame_rate) if first_non_none_idx >= 0 else -1.0
+    logger.info(
+        (
+            "Loaded steering vectors for %s layer=%d: total_steps=%d, active_steps=%d, "
+            "vector_dim=%d, max_l2=%.6f, first_active_idx=%d, first_active_time=%.6fs"
+        ),
+        sample_dir,
+        int(layer),
+        len(out),
+        non_null,
+        first_dim,
+        max_l2,
+        first_non_none_idx,
+        first_time_sec,
+    )
+    return out
+
+
 def inference_batch(
     root_dir: str | Path,
-    steer: bool = False,
+    steer: int | None = None,
     *,
     model_path: str = "KRAFTON/Raon-SpeechChat-9B",
     device: str = "cuda",
@@ -160,7 +241,7 @@ def inference_batch(
     speaker_audio: str | None = None,
     save_hidden: bool = False,
 ) -> dict[str, int]:
-    """Run listen-first duplex inference for every ``root/*/input.wav``.
+    """Run duplex inference for every ``root/*/input.wav``.
 
     Each sample directory gets:
     - ``assistant.wav`` and ``user_assistant.wav`` (from ``pipe.duplex``)
@@ -168,7 +249,7 @@ def inference_batch(
 
     Args:
         root_dir: Dataset root containing sample folders.
-        steer: Reserved flag for future steering logic.
+        steer: Optional steering target layer index. If set, apply per-step vectors from steering_vector.json.
         model_path: RAON duplex model path or HF repo id.
         device: Inference device.
         dtype: Torch dtype string.
@@ -176,8 +257,8 @@ def inference_batch(
         speaker_audio: Optional speaker reference audio.
         save_hidden: Save per-step hidden payload to output_hidden.pt under each sample directory.
     """
-    if steer:
-        logger.warning("steer=True is not implemented yet; running unsteered inference.")
+    if steer is not None:
+        logger.info("Steering enabled at layer=%s", steer)
 
     root = Path(root_dir).expanduser().resolve()
     if not root.exists():
@@ -216,6 +297,9 @@ def inference_batch(
                 "speaker_audio": resolved_speaker_audio,
                 "save_hidden": save_hidden,
             }
+            if steer is not None:
+                duplex_kwargs["steering_layer"] = int(steer)
+                duplex_kwargs["steering_vectors"] = _load_step_steering_vectors(sample_dir, int(steer))
             if speak_first is not None:
                 duplex_kwargs["speak_first"] = speak_first
             if resolved_prompt is not None:
@@ -256,7 +340,7 @@ def inference_batch(
 def _build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Run RAON duplex inference for root/*/input.wav dataset.")
     ap.add_argument("root_dir", type=str, help="Dataset root directory.")
-    ap.add_argument("--steer", action="store_true", help="Reserved; not implemented yet.")
+    ap.add_argument("--steer", type=int, default=None, metavar="LAYER", help="Steering layer index (0-based thinker layer).")
     ap.add_argument("--model-path", type=str, default="KRAFTON/Raon-SpeechChat-9B", help="Model path or HF repo id.")
     ap.add_argument("--device", type=str, default="cuda", help="Inference device.")
     ap.add_argument("--dtype", type=str, default="bfloat16", choices=["bfloat16", "float16", "float32"], help="Torch dtype.")

@@ -391,6 +391,8 @@ def run_duplex_inference(
     bc_penalty: float = 0.0,
     speak_first: bool = False,
     save_hidden: bool = False,
+    steering_layer: int | None = None,
+    steering_vectors: list[torch.Tensor | None] | None = None,
 ) -> dict:
     """Run full-duplex inference on a single audio input and save results.
 
@@ -429,6 +431,14 @@ def run_duplex_inference(
     samples_per_frame = int(sr / processor.frame_rate)
     audio_input_length = audio_input.shape[-1]
     expected_decode_steps = ((audio_input_length - samples_per_frame) // samples_per_frame) + 1
+    if steering_layer is not None and steering_vectors is not None:
+        _active_steps = sum(1 for v in steering_vectors if v is not None)
+        logger.info(
+            "Steering active: layer=%d, vectors=%d, active_steps=%d",
+            int(steering_layer),
+            len(steering_vectors),
+            _active_steps,
+        )
 
     if audio_input_length < samples_per_frame:
         raise ValueError(
@@ -469,10 +479,19 @@ def run_duplex_inference(
                 desc="Duplex Generation",
             ):
                 audio_input_frame = audio_input[:, i : i + samples_per_frame]
+                step_steering_vector = None
+                if steering_vectors is not None and _frame_idx < len(steering_vectors):
+                    step_steering_vector = steering_vectors[_frame_idx]
+                _steer_tag = "-"
+                if steering_layer is not None and step_steering_vector is not None:
+                    _steer_norm = float(step_steering_vector.float().norm().item())
+                    _steer_tag = f"L{int(steering_layer)}|norm={_steer_norm:.4f}"
                 state, audio_output_frame = model.duplex_decoding_step(
                     state=state,
                     audio_input=audio_input_frame,
                     hidden_collector=hidden_steps if save_hidden else None,
+                    steering_layer=steering_layer,
+                    steering_vector=step_steering_vector,
                 )
                 audio_output_frames.append(audio_output_frame)
 
@@ -500,7 +519,7 @@ def run_duplex_inference(
                 _phase = state.machine_state.phase.name if state.machine_state is not None else "?"
                 _frame_log.write(
                     f"[{_phase}] f={_frame_idx} text={repr(_text_str) if _text_str else '-'} "
-                    f"out_rms={_out_rms:.4f} in_rms={_in_rms:.4f} ntok={_cur_seq_len - _prev_seq_len}\n"
+                    f"out_rms={_out_rms:.4f} in_rms={_in_rms:.4f} ntok={_cur_seq_len - _prev_seq_len} steer={_steer_tag}\n"
                 )
                 _prev_seq_len = _cur_seq_len
                 _frame_idx += 1

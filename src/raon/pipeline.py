@@ -489,6 +489,8 @@ class RaonPipeline:
         output_dir: str,
         *,
         save_hidden: bool = False,
+        steering_layer: int | None = None,
+        steering_vectors: list[torch.Tensor | None] | None = None,
         system_prompt: str | None = None,
         speak_first: bool | None = None,
         temperature: float | None = None,
@@ -509,6 +511,8 @@ class RaonPipeline:
             output_dir: Directory to save output files.
             system_prompt: System prompt text.
             save_hidden: If True, save per-step hidden payload to output_hidden.pt.
+            steering_layer: Optional thinker layer index to inject steering vectors.
+            steering_vectors: Optional per-step vectors; each step can be None (no injection) or a 1D vector.
             speak_first: If True, the model speaks first.
             temperature: Sampling temperature.
             top_p: Top-p sampling threshold.
@@ -562,6 +566,8 @@ class RaonPipeline:
             eos_penalty=eos_penalty,
             speak_first=speak_first,
             save_hidden=save_hidden,
+            steering_layer=steering_layer,
+            steering_vectors=steering_vectors,
         )
 
     # ------------------------------------------------------------------

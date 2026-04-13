@@ -1028,6 +1028,8 @@ class RaonInferenceModel(ABC):
         state: RaonDecodingState,
         audio_input: torch.Tensor,
         hidden_collector: list[dict[str, torch.Tensor]] | None = None,
+        steering_layer: int | None = None,
+        steering_vector: torch.Tensor | None = None,
     ) -> tuple[RaonDecodingState, torch.Tensor]:
         """Run one duplex decoding step: encode user audio, predict tokens/codes, push codes, pull waveform.
 
@@ -1086,20 +1088,25 @@ class RaonInferenceModel(ABC):
         seq_len = state.attention_mask.shape[1]
         cache_position = torch.arange(seq_len - num_input_tokens, seq_len, device=state.sequences.device)
         step_input_ids = state.sequences[:, -num_input_tokens:]
-        inference_outputs = self.inference_forward(
-            return_hidden_layer_means=hidden_collector is not None,
-            input_ids=state.sequences[:, -num_input_tokens:],
-            attention_mask=None,
-            position_ids=full_position_ids[:, -num_input_tokens:],
-            audio_output_codes=step_audio_codes,
-            audio_output_codes_mask=step_audio_codes_mask,
-            audio_input_embeds=audio_input_embeds,
-            audio_input_embeds_mask=audio_input_embeds_mask,
-            speaker_embeds=None,
-            use_cache=True,
-            past_key_values=state.past_key_values,
-            cache_position=cache_position,
-        )
+        base_model = self.get_model()
+        base_model.set_step_steering(steering_layer=steering_layer, steering_vector=steering_vector)
+        try:
+            inference_outputs = self.inference_forward(
+                return_hidden_layer_means=hidden_collector is not None,
+                input_ids=state.sequences[:, -num_input_tokens:],
+                attention_mask=None,
+                position_ids=full_position_ids[:, -num_input_tokens:],
+                audio_output_codes=step_audio_codes,
+                audio_output_codes_mask=step_audio_codes_mask,
+                audio_input_embeds=audio_input_embeds,
+                audio_input_embeds_mask=audio_input_embeds_mask,
+                speaker_embeds=None,
+                use_cache=True,
+                past_key_values=state.past_key_values,
+                cache_position=cache_position,
+            )
+        finally:
+            base_model.set_step_steering(steering_layer=None, steering_vector=None)
         step_input_ids_cpu: torch.Tensor | None = None
         step_hidden_layers_cpu: torch.Tensor | None = None
         if hidden_collector is not None:
