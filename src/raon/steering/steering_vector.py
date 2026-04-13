@@ -120,7 +120,7 @@ def _build_mode_masks(num_steps: int, frame_rate: float, question_start: float, 
 
 def _discover_mode_samples(mode_class_dataset: Path) -> list[Path]:
     sample_dirs = [p for p in mode_class_dataset.iterdir() if p.is_dir()]
-    sample_dirs.sort(key=lambda p: int(p.name) if p.name.isdigit() else p.name)
+    sample_dirs.sort(key=lambda p: (0, int(p.name)) if p.name.isdigit() else (1, p.name))
 
     valid: list[Path] = []
     for sd in sample_dirs:
@@ -240,7 +240,7 @@ def write_steering_vectors(
     n_layers = int(direction.shape[0])
 
     target_dirs = [p for p in root.iterdir() if p.is_dir() and (p / "input_timing.json").is_file()]
-    target_dirs.sort(key=lambda p: int(p.name) if p.name.isdigit() else p.name)
+    target_dirs.sort(key=lambda p: (0, int(p.name)) if p.name.isdigit() else (1, p.name))
     if not target_dirs:
         raise FileNotFoundError(f"No target entries under {root} with input_timing.json")
 
