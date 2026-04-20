@@ -17,6 +17,14 @@ from raon.utils.duplex_data import CHANNEL_DUPLEX_TO_SYSTEM_MESSAGE, get_duplex_
 logger = logging.getLogger(__name__)
 
 
+def _is_zero_audio_result_error(exc: BaseException) -> bool:
+    msg = str(exc)
+    return (
+        "Expected exactly one audio result" in msg
+        and "got `0`" in msg
+    )
+
+
 def _is_local_path(model_path: str) -> bool:
     return model_path.startswith(("/", "./", "../", "~"))
 
@@ -310,6 +318,8 @@ def inference_batch(
         try:
             # channel = _resolve_audio_channel(input_path, channel_mode=channel_mode)
             audio_input = pipe.load_audio(str(input_path)) # channel=channel)
+            logger.info("Loaded input wav: %s", input_path)
+            print(f"[steer_inference] sample={sample_dir.name} input_wav={input_path}", flush=True)
             duplex_kwargs = {
                 "audio_input": audio_input,
                 "output_dir": str(sample_dir),
@@ -340,9 +350,29 @@ def inference_batch(
             if bc_penalty is not None:
                 duplex_kwargs["bc_penalty"] = bc_penalty
 
-            pipe.duplex(
-                **duplex_kwargs,
-            )
+            try:
+                pipe.duplex(
+                    **duplex_kwargs,
+                )
+            except AssertionError as exc:
+                if steer is None or not _is_zero_audio_result_error(exc):
+                    raise
+                logger.warning(
+                    "Decoder produced zero audio frames with steering for %s. Retrying once without steering.",
+                    sample_dir,
+                )
+                print(
+                    f"[steer_inference][WARN] sample={sample_dir.name} steering decode produced 0 audio frames; retry without steering",
+                    flush=True,
+                )
+                retry_kwargs = dict(duplex_kwargs)
+                retry_kwargs.pop("steering_layer", None)
+                retry_kwargs.pop("steering_vectors", None)
+                pipe.duplex(**retry_kwargs)
+                print(
+                    f"[steer_inference] sample={sample_dir.name} retry_without_steering=success",
+                    flush=True,
+                )
 
             assistant_wav = sample_dir / "assistant.wav"
             output_wav = sample_dir / "output.wav"
