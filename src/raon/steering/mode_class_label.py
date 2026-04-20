@@ -97,7 +97,7 @@ def _collect_valid_sample_dirs(root: Path) -> list[Path]:
     if not root.is_dir():
         raise FileNotFoundError(f"Root directory not found: {root}")
     sample_dirs = [p for p in root.iterdir() if p.is_dir()]
-    sample_dirs.sort(key=lambda p: int(p.name) if p.name.isdigit() else p.name)
+    sample_dirs.sort(key=lambda p: (0, int(p.name)) if p.name.isdigit() else (1, p.name))
     valid: list[Path] = []
     for sd in sample_dirs:
         if (sd / "output_hidden.pt").is_file():
