@@ -345,6 +345,59 @@ def _validate_layer_range(layer_start: int, layer_end: int, num_layers: int) -> 
     return list(range(layer_start, layer_end + 1))
 
 
+def _save_ll_heatmap(
+    ll_mat_lt: np.ndarray,
+    layer_ids: list[int],
+    out_png: Path,
+    *,
+    title: str,
+) -> None:
+    """Save LL heatmap where y=layer and x=step index."""
+    if ll_mat_lt.ndim != 2:
+        raise ValueError(f"Expected 2D LL matrix, got shape={ll_mat_lt.shape}")
+    if ll_mat_lt.shape[0] != len(layer_ids):
+        raise ValueError(
+            f"Layer dimension mismatch: mat has {ll_mat_lt.shape[0]}, layer_ids has {len(layer_ids)}"
+        )
+
+    vals = ll_mat_lt[np.isfinite(ll_mat_lt)]
+    if vals.size == 0:
+        vmin, vmax = -1.0, 1.0
+    else:
+        vmin = float(np.percentile(vals, 5.0))
+        vmax = float(np.percentile(vals, 95.0))
+        if vmax <= vmin:
+            vmax = vmin + 1e-6
+
+    n_layers, n_steps = ll_mat_lt.shape
+    fig_w = max(8.0, min(20.0, 0.06 * n_steps))
+    fig_h = max(4.0, min(10.0, 0.34 * n_layers + 2.5))
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=180)
+    im = ax.imshow(
+        ll_mat_lt,
+        aspect="auto",
+        interpolation="nearest",
+        origin="lower",
+        cmap="coolwarm",
+        vmin=vmin,
+        vmax=vmax,
+    )
+    ax.set_xlabel("Step index")
+    ax.set_ylabel("Layer")
+    ax.set_title(title)
+
+    ax.set_yticks(np.arange(n_layers, dtype=np.int32))
+    ax.set_yticklabels([str(x) for x in layer_ids])
+
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label("Log-likelihood")
+
+    fig.tight_layout()
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_png, bbox_inches="tight")
+    plt.close(fig)
+
+
 def generate_input_jsons(
     root_dir: str,
     model_path: str,
@@ -411,11 +464,37 @@ def generate_input_jsons(
             ll_listen = in_ll[:, :t_common]
             ll_speak = out_ll[:, :t_common]
 
-            speak_mask = np.all(ll_speak >= theta_speak, axis=0) & np.all(
-                ll_listen < theta_listen, axis=0
+            layer_idx = np.asarray(layer_ids, dtype=np.int64)
+            ll_listen_sel = ll_listen[layer_idx, :]
+            ll_speak_sel = ll_speak[layer_idx, :]
+
+            speak_mask = np.all(ll_speak_sel >= theta_speak, axis=0) & np.all(
+                ll_listen_sel < theta_listen, axis=0
             )
-            listen_mask = np.all(ll_listen >= theta_listen, axis=0) & np.all(
-                ll_speak < theta_speak, axis=0
+            listen_mask = np.all(ll_listen_sel >= theta_listen, axis=0) & np.all(
+                ll_speak_sel < theta_speak, axis=0
+            )
+
+            out_ll_listen_png = sample_dir / "ll_heatmap_listen.png"
+            _save_ll_heatmap(
+                ll_listen_sel,
+                layer_ids,
+                out_ll_listen_png,
+                title=(
+                    f"LL Heatmap (listen line) | layers={layer_ids[0]}..{layer_ids[-1]} | "
+                    f"steps={t_common}"
+                ),
+            )
+
+            out_ll_speak_png = sample_dir / "ll_heatmap_speak.png"
+            _save_ll_heatmap(
+                ll_speak_sel,
+                layer_ids,
+                out_ll_speak_png,
+                title=(
+                    f"LL Heatmap (speak line) | layers={layer_ids[0]}..{layer_ids[-1]} | "
+                    f"steps={t_common}"
+                ),
             )
 
             out = {
@@ -433,7 +512,8 @@ def generate_input_jsons(
             ok += 1
             print(
                 f"  [OK] {sample_dir.name}: steps={t_common}, "
-                f"listen={int(listen_mask.sum())}, speak={int(speak_mask.sum())}"
+                f"listen={int(listen_mask.sum())}, speak={int(speak_mask.sum())}, "
+                f"heatmaps={out_ll_listen_png.name},{out_ll_speak_png.name}"
             )
         except Exception as exc:  # noqa: BLE001
             print(f"  [SKIP] {sample_dir.name}: {exc}")
