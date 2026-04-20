@@ -7,12 +7,6 @@ Preferred labeling source (per sample):
 - ``input.json`` generated from LL thresholds, with
     ``modes.listening`` and ``modes.speaking`` ranges at step index granularity.
 
-Fallback labeling (legacy):
-- listening: question_start + 1s < t < question_end - 1s
-- speaking:  question_end + 1s < t < question_end + 11s
-
-Where t is token time in seconds derived from frame_rate.
-
 Then it writes steering vectors into root_dir/*/steering_vector.json using the
 same nested format used by Personaplex:
     {
@@ -78,23 +72,6 @@ def _load_hidden(path: Path) -> tuple[torch.Tensor, float]:
     return hidden.float(), frame_rate
 
 
-def _load_timing(path: Path) -> tuple[float, float, float]:
-    with path.open("r", encoding="utf-8") as f:
-        timing = json.load(f)
-    if not isinstance(timing, dict):
-        raise ValueError(f"Expected dict in {path}, got {type(timing)}")
-    for key in ("question_start", "question_end", "interrupt_start"):
-        if key not in timing:
-            raise KeyError(f"Missing '{key}' in {path}")
-
-    question_start = float(timing["question_start"])
-    question_end = float(timing["question_end"])
-    interrupt_start = float(timing["interrupt_start"])
-    assert question_end > question_start, f"Expected question_end > question_start in {path}"
-
-    return question_start, question_end, interrupt_start
-
-
 def _load_interrupt_timing(path: Path) -> float:
     with path.open("r", encoding="utf-8") as f:
         timing = json.load(f)
@@ -105,21 +82,6 @@ def _load_interrupt_timing(path: Path) -> float:
 
     interrupt_start = float(timing["interrupt_start"])
     return interrupt_start
-
-
-def _load_question_timing(path: Path) -> tuple[float, float]:
-    with path.open("r", encoding="utf-8") as f:
-        timing = json.load(f)
-    if not isinstance(timing, dict):
-        raise ValueError(f"Expected dict in {path}, got {type(timing)}")
-    for key in ("question_start", "question_end"):
-        if key not in timing:
-            raise KeyError(f"Missing '{key}' in {path}")
-
-    question_start = float(timing["question_start"])
-    question_end = float(timing["question_end"])
-    assert question_end > question_start, f"Expected question_end > question_start in {path}"
-    return question_start, question_end
 
 
 def _wav_duration_seconds(wav_path: Path) -> float:
@@ -137,16 +99,6 @@ def _wav_duration_seconds(wav_path: Path) -> float:
         if info.samplerate <= 0:
             raise ValueError(f"Invalid sample rate in WAV: {wav_path}")
         return float(info.frames) / float(info.samplerate)
-
-
-def _build_mode_masks(num_steps: int, frame_rate: float, question_start: float, question_end: float) -> tuple[torch.Tensor, torch.Tensor]:
-    idx = torch.arange(num_steps, dtype=torch.float32)
-    times = idx / float(frame_rate)
-
-    listen_mask = (times > (question_start + 1.0)) & (times < (question_end - 1.0))
-    speak_mask = (times > (question_end + 1.0)) & (times < (question_end + 11.0))
-
-    return listen_mask, speak_mask
 
 
 def _discover_mode_samples(mode_class_dataset: Path) -> list[Path]:
@@ -178,10 +130,10 @@ def _ranges_to_mask(ranges: Any, n_steps: int) -> torch.Tensor:
     return mask
 
 
-def _load_mode_masks_from_input_json(entry_dir: Path, n_steps: int) -> tuple[torch.Tensor, torch.Tensor] | None:
+def _load_mode_masks_from_input_json(entry_dir: Path, n_steps: int) -> tuple[torch.Tensor, torch.Tensor]:
     input_json = entry_dir / "input.json"
     if not input_json.is_file():
-        return None
+        raise FileNotFoundError(f"Missing required label file: {input_json}")
     with input_json.open("r", encoding="utf-8") as f:
         data = json.load(f)
     if not isinstance(data, dict):
@@ -200,7 +152,7 @@ def _compute_mean_direction(mode_class_dataset: Path, alpha: float) -> tuple[tor
     sample_dirs = _discover_mode_samples(mode_class_dataset)
     if not sample_dirs:
         raise FileNotFoundError(
-            f"No valid samples found in {mode_class_dataset}. Need */output_hidden.pt and */input_timing.json"
+            f"No valid samples found in {mode_class_dataset}. Need */output_hidden.pt"
         )
 
     listen_sum: torch.Tensor | None = None
@@ -208,9 +160,6 @@ def _compute_mean_direction(mode_class_dataset: Path, alpha: float) -> tuple[tor
     listen_count: int = 0
     speak_count: int = 0
     dataset_frame_rate: float | None = None
-
-    labeled_by_input_json = 0
-    labeled_by_timing_fallback = 0
 
     for sd in sample_dirs:
         hidden, frame_rate = _load_hidden(sd / "output_hidden.pt")  # [T,L,D]
@@ -221,20 +170,7 @@ def _compute_mean_direction(mode_class_dataset: Path, alpha: float) -> tuple[tor
                 f"Inconsistent frame_rate in mode_class_dataset: {frame_rate} vs {dataset_frame_rate}"
             )
         num_steps = int(hidden.shape[0])
-        masks = _load_mode_masks_from_input_json(sd, num_steps)
-        if masks is not None:
-            listen_mask, speak_mask = masks
-            labeled_by_input_json += 1
-        else:
-            timing_path = sd / "input_timing.json"
-            if not timing_path.is_file():
-                raise FileNotFoundError(
-                    f"Missing both {sd / 'input.json'} and {timing_path}. "
-                    "Need at least one labeling source."
-                )
-            q_start, q_end = _load_question_timing(timing_path)
-            listen_mask, speak_mask = _build_mode_masks(num_steps, frame_rate, q_start, q_end)
-            labeled_by_timing_fallback += 1
+        listen_mask, speak_mask = _load_mode_masks_from_input_json(sd, num_steps)
 
         sample_listen_count = int(listen_mask.sum())
         sample_speak_count = int(speak_mask.sum())
@@ -266,8 +202,7 @@ def _compute_mean_direction(mode_class_dataset: Path, alpha: float) -> tuple[tor
     assert speak_count > 0, "No speaking tokens collected from mode_class_dataset"
     print(
         f"[steering_vector][mode_class] aggregate listening_steps={listen_count} "
-        f"speaking_steps={speak_count} "
-        f"(input.json={labeled_by_input_json}, timing_fallback={labeled_by_timing_fallback})"
+        f"speaking_steps={speak_count}"
     )
 
     mu_listen = listen_sum / float(listen_count)  # [L,D]
