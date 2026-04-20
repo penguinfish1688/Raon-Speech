@@ -207,7 +207,21 @@ def _compute_mean_direction(mode_class_dataset: Path, alpha: float) -> tuple[tor
 
     mu_listen = listen_sum / float(listen_count)  # [L,D]
     mu_speak = speak_sum / float(speak_count)  # [L,D]
-    direction = (mu_speak - mu_listen) * float(alpha)
+    raw_diff = mu_speak - mu_listen
+    raw_l2_per_layer = torch.linalg.vector_norm(raw_diff, ord=2, dim=1)
+    raw_l2_mean = float(raw_l2_per_layer.mean().item())
+    raw_l2_min = float(raw_l2_per_layer.min().item())
+    raw_l2_max = float(raw_l2_per_layer.max().item())
+    print(
+        "[steering_vector][mode_class] raw ||mu_speak - mu_listen||_2 per layer: "
+        f"{[float(x) for x in raw_l2_per_layer.tolist()]}"
+    )
+    print(
+        "[steering_vector][mode_class] raw diff L2 summary: "
+        f"min={raw_l2_min:.6f}, mean={raw_l2_mean:.6f}, max={raw_l2_max:.6f}"
+    )
+
+    direction = raw_diff * float(alpha)
     assert dataset_frame_rate is not None
     return direction, float(dataset_frame_rate)
 
