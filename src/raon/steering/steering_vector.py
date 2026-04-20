@@ -3,7 +3,11 @@
 This script computes a mean steering direction from a mode-class dataset:
     direction = mu_speak - mu_listen
 
-Token windows for labeling (per sample):
+Preferred labeling source (per sample):
+- ``input.json`` generated from LL thresholds, with
+    ``modes.listening`` and ``modes.speaking`` ranges at step index granularity.
+
+Fallback labeling (legacy):
 - listening: question_start + 1s < t < question_end - 1s
 - speaking:  question_end + 1s < t < question_end + 11s
 
@@ -151,9 +155,45 @@ def _discover_mode_samples(mode_class_dataset: Path) -> list[Path]:
 
     valid: list[Path] = []
     for sd in sample_dirs:
-        if (sd / "output_hidden.pt").is_file() and (sd / "input_timing.json").is_file():
+        if (sd / "output_hidden.pt").is_file():
             valid.append(sd)
     return valid
+
+
+def _ranges_to_mask(ranges: Any, n_steps: int) -> torch.Tensor:
+    mask = torch.zeros((n_steps,), dtype=torch.bool)
+    if not isinstance(ranges, list):
+        return mask
+    for pair in ranges:
+        if not isinstance(pair, list) or len(pair) != 2:
+            continue
+        start = int(pair[0])
+        end = int(pair[1])
+        if end < 0 or start >= n_steps:
+            continue
+        s = max(0, start)
+        e = min(n_steps - 1, end)
+        if e >= s:
+            mask[s : e + 1] = True
+    return mask
+
+
+def _load_mode_masks_from_input_json(entry_dir: Path, n_steps: int) -> tuple[torch.Tensor, torch.Tensor] | None:
+    input_json = entry_dir / "input.json"
+    if not input_json.is_file():
+        return None
+    with input_json.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError(f"Expected dict in {input_json}, got {type(data)}")
+    modes = data.get("modes")
+    if not isinstance(modes, dict):
+        raise KeyError(f"Missing/invalid 'modes' in {input_json}")
+    if "listening" not in modes or "speaking" not in modes:
+        raise KeyError(f"Missing 'modes.listening' or 'modes.speaking' in {input_json}")
+    listen_mask = _ranges_to_mask(modes.get("listening", []), n_steps)
+    speak_mask = _ranges_to_mask(modes.get("speaking", []), n_steps)
+    return listen_mask, speak_mask
 
 
 def _compute_mean_direction(mode_class_dataset: Path, alpha: float) -> tuple[torch.Tensor, float]:
@@ -169,6 +209,9 @@ def _compute_mean_direction(mode_class_dataset: Path, alpha: float) -> tuple[tor
     speak_count: int = 0
     dataset_frame_rate: float | None = None
 
+    labeled_by_input_json = 0
+    labeled_by_timing_fallback = 0
+
     for sd in sample_dirs:
         hidden, frame_rate = _load_hidden(sd / "output_hidden.pt")  # [T,L,D]
         if dataset_frame_rate is None:
@@ -177,15 +220,27 @@ def _compute_mean_direction(mode_class_dataset: Path, alpha: float) -> tuple[tor
             assert abs(float(frame_rate) - float(dataset_frame_rate)) < 1e-6, (
                 f"Inconsistent frame_rate in mode_class_dataset: {frame_rate} vs {dataset_frame_rate}"
             )
-        q_start, q_end = _load_question_timing(sd / "input_timing.json")
-
         num_steps = int(hidden.shape[0])
-        listen_mask, speak_mask = _build_mode_masks(num_steps, frame_rate, q_start, q_end)
+        masks = _load_mode_masks_from_input_json(sd, num_steps)
+        if masks is not None:
+            listen_mask, speak_mask = masks
+            labeled_by_input_json += 1
+        else:
+            timing_path = sd / "input_timing.json"
+            if not timing_path.is_file():
+                raise FileNotFoundError(
+                    f"Missing both {sd / 'input.json'} and {timing_path}. "
+                    "Need at least one labeling source."
+                )
+            q_start, q_end = _load_question_timing(timing_path)
+            listen_mask, speak_mask = _build_mode_masks(num_steps, frame_rate, q_start, q_end)
+            labeled_by_timing_fallback += 1
+
         sample_listen_count = int(listen_mask.sum())
         sample_speak_count = int(speak_mask.sum())
         print(
             f"[steering_vector][mode_class] sample={sd.name} "
-            f"listening_tokens={sample_listen_count} speaking_tokens={sample_speak_count} "
+            f"listening_steps={sample_listen_count} speaking_steps={sample_speak_count} "
             f"total_steps={num_steps}"
         )
 
@@ -210,8 +265,9 @@ def _compute_mean_direction(mode_class_dataset: Path, alpha: float) -> tuple[tor
     assert listen_count > 0, "No listening tokens collected from mode_class_dataset"
     assert speak_count > 0, "No speaking tokens collected from mode_class_dataset"
     print(
-        f"[steering_vector][mode_class] aggregate listening_tokens={listen_count} "
-        f"speaking_tokens={speak_count}"
+        f"[steering_vector][mode_class] aggregate listening_steps={listen_count} "
+        f"speaking_steps={speak_count} "
+        f"(input.json={labeled_by_input_json}, timing_fallback={labeled_by_timing_fallback})"
     )
 
     mu_listen = listen_sum / float(listen_count)  # [L,D]

@@ -381,7 +381,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default="mono",
         choices=["auto-user", "mono", "left", "right"],
         help="Input channel selection for stereo wavs. Notebook parity uses mono.",
-    )
+    ) 
     speak_group = ap.add_mutually_exclusive_group()
     speak_group.add_argument("--speak-first", action="store_true", help="Force speak-first mode.")
     speak_group.add_argument("--listen-first", action="store_true", help="Force listen-first mode.")
